@@ -19,6 +19,7 @@ uint32_t getECVersion(struct fragment_header_s *header) { return header->libec_v
 import "C"
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"runtime"
@@ -116,6 +117,12 @@ func InitBackend(params Params) (Backend, error) {
 		return backend, fmt.Errorf("instance_create() returned %v", errToName(-desc))
 	}
 	backend.libecDesc = desc
+
+	// Workaround on init bug of Jerasure
+	// Apparently, jerasure will crash if the
+	// first encode is done concurrently with other encode.
+	backend.Encode(bytes.Repeat([]byte("1"), 1000))
+
 	return backend, nil
 }
 
