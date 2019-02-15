@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/tipabu/erasurecode"
+	"github.com/benoit-a/erasurecode"
 )
 
 func init() {

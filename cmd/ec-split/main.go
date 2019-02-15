@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/tipabu/erasurecode"
+	"github.com/benoit-a/erasurecode"
 )
 
 var backendName = flag.String("b", "", "the backend to use")

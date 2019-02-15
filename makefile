@@ -22,11 +22,11 @@ cmds: ec-split ec-info
 
 ec-split: $(PWD)/cmd/ec-split/main.go $(PWD)/backend.go $(PWD)/streaming.go
 	PKG_CONFIG_PATH=$(BUILDDIR)/lib/pkgconfig \
-	go build github.com/tipabu/erasurecode/cmd/ec-split
+	go build github.com/benoit-a/erasurecode/cmd/ec-split
 
 ec-info: $(PWD)/cmd/ec-info/main.go $(PWD)/backend.go $(PWD)/streaming.go
 	PKG_CONFIG_PATH=$(BUILDDIR)/lib/pkgconfig \
-	go build github.com/tipabu/erasurecode/cmd/ec-info
+	go build github.com/benoit-a/erasurecode/cmd/ec-info
 
 clean:
 	rm -rf $(BUILDDIR) $(DEPDIR)
