@@ -121,7 +121,14 @@ func InitBackend(params Params) (Backend, error) {
 	// Workaround on init bug of Jerasure
 	// Apparently, jerasure will crash if the
 	// first encode is done concurrently with other encode.
-	backend.Encode(bytes.Repeat([]byte("1"), 1000))
+	_, fin, err := backend.Encode(bytes.Repeat([]byte("1"), 1000))
+
+	if err != nil {
+		backend.Close()
+		return Backend{}, err
+	}
+
+	defer fin()
 
 	return backend, nil
 }
@@ -137,7 +144,7 @@ func (backend *Backend) Close() error {
 	return nil
 }
 
-func (backend *Backend) Encode(data []byte) ([][]byte, error) {
+func (backend *Backend) Encode(data []byte) ([][]byte, func(), error) {
 	var dataFrags **C.char
 	var parityFrags **C.char
 	var fragLength C.uint64_t
@@ -145,18 +152,22 @@ func (backend *Backend) Encode(data []byte) ([][]byte, error) {
 	if rc := C.liberasurecode_encode(
 		backend.libecDesc, pData, C.uint64_t(len(data)),
 		&dataFrags, &parityFrags, &fragLength); rc != 0 {
-		return nil, fmt.Errorf("encode() returned %v", errToName(-rc))
+		return nil, nil, fmt.Errorf("encode() returned %v", errToName(-rc))
 	}
-	defer C.liberasurecode_encode_cleanup(
-		backend.libecDesc, dataFrags, parityFrags)
+
 	result := make([][]byte, backend.K+backend.M)
 	for i := 0; i < backend.K; i++ {
-		result[i] = C.GoBytes(C.getStrArrayItem(dataFrags, C.int(i)), C.int(fragLength))
+		// Convert the data block into a slice without copying the data.
+		// Note: the 1 << 30 is not really used, the slice is set to a length & a capacity.
+		result[i] = (*[1 << 30]byte)(C.getStrArrayItem(dataFrags, C.int(i)))[:int(fragLength):int(fragLength)]
 	}
 	for i := 0; i < backend.M; i++ {
-		result[i+backend.K] = C.GoBytes(C.getStrArrayItem(parityFrags, C.int(i)), C.int(fragLength))
+		result[i+backend.K] = (*[1 << 30]byte)(C.getStrArrayItem(parityFrags, C.int(i)))[:int(fragLength):int(fragLength)]
 	}
-	return result, nil
+	return result, func() {
+		C.liberasurecode_encode_cleanup(
+			backend.libecDesc, dataFrags, parityFrags)
+	}, nil
 }
 
 func (backend *Backend) Decode(frags [][]byte) ([]byte, error) {
