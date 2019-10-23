@@ -173,7 +173,7 @@ func TestEncodeDecode(t *testing.T) {
 			}
 
 			decode := func(frags [][]byte, description string) bool {
-				data, err := backend.Decode(frags)
+				data, fin2, err := backend.Decode(frags)
 				if err != nil {
 					t.Errorf("%v: %v: %q for pattern %d", description, backend, err, patternIndex)
 					return false
@@ -181,6 +181,7 @@ func TestEncodeDecode(t *testing.T) {
 					t.Errorf("%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, data)
 					return false
 				}
+				fin2()
 				return true
 			}
 
@@ -198,7 +199,7 @@ func TestEncodeDecode(t *testing.T) {
 			fin()
 		}
 
-		if _, err := backend.Decode([][]byte{}); err == nil {
+		if _, _, err := backend.Decode([][]byte{}); err == nil {
 			t.Errorf("Expected error when decoding from empty fragment array")
 		}
 
@@ -469,11 +470,12 @@ func TestGC(t *testing.T) {
 				}
 				defer fin()
 
-				data, err := backend.Decode(vect[0:2])
+				data, fin2, err := backend.Decode(vect[0:2])
 				if err != nil {
 					t.Fatalf("cannot decode data: %v", err)
 					return
 				}
+				defer fin2()
 
 				if len(data) != len(input) {
 					t.Fatal("decoding failed")
@@ -524,5 +526,22 @@ func BenchmarkEncode(b *testing.B) {
 			b.Fatal(err)
 		}
 		fin()
+	}
+}
+func BenchmarkDecode(b *testing.B) {
+	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 5, M: 1, W: 8, HD: 5})
+
+	buf := bytes.Repeat([]byte("A"), 1024*1024)
+	vect, fin, _ := backend.Encode(buf)
+
+	defer fin()
+
+	for i := 0; i < b.N; i++ {
+		_, fin2, err := backend.Decode(vect)
+
+		if err != nil {
+			b.Fatal(err)
+		}
+		fin2()
 	}
 }
