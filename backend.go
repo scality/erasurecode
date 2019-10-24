@@ -121,14 +121,14 @@ func InitBackend(params Params) (Backend, error) {
 	// Workaround on init bug of Jerasure
 	// Apparently, jerasure will crash if the
 	// first encode is done concurrently with other encode.
-	_, fin, err := backend.Encode(bytes.Repeat([]byte("1"), 1000))
+	res, err := backend.Encode(bytes.Repeat([]byte("1"), 1000))
 
 	if err != nil {
 		backend.Close()
 		return Backend{}, err
 	}
 
-	defer fin()
+	defer res.Free()
 
 	return backend, nil
 }
@@ -144,7 +144,12 @@ func (backend *Backend) Close() error {
 	return nil
 }
 
-func (backend *Backend) Encode(data []byte) ([][]byte, func(), error) {
+type EncodeData struct {
+	Data [][]byte
+	Free func()
+}
+
+func (backend *Backend) Encode(data []byte) (*EncodeData, error) {
 	var dataFrags **C.char
 	var parityFrags **C.char
 	var fragLength C.uint64_t
@@ -152,7 +157,7 @@ func (backend *Backend) Encode(data []byte) ([][]byte, func(), error) {
 	if rc := C.liberasurecode_encode(
 		backend.libecDesc, pData, C.uint64_t(len(data)),
 		&dataFrags, &parityFrags, &fragLength); rc != 0 {
-		return nil, nil, fmt.Errorf("encode() returned %v", errToName(-rc))
+		return nil, fmt.Errorf("encode() returned %v", errToName(-rc))
 	}
 
 	result := make([][]byte, backend.K+backend.M)
@@ -164,17 +169,22 @@ func (backend *Backend) Encode(data []byte) ([][]byte, func(), error) {
 	for i := 0; i < backend.M; i++ {
 		result[i+backend.K] = (*[1 << 30]byte)(C.getStrArrayItem(parityFrags, C.int(i)))[:int(fragLength):int(fragLength)]
 	}
-	return result, func() {
+	return &EncodeData{result, func() {
 		C.liberasurecode_encode_cleanup(
 			backend.libecDesc, dataFrags, parityFrags)
-	}, nil
+	}}, nil
 }
 
-func (backend *Backend) Decode(frags [][]byte) ([]byte, func(), error) {
+type DecodeData struct {
+	Data []byte
+	Free func()
+}
+
+func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 	var data *C.char
 	var dataLength C.uint64_t
 	if len(frags) == 0 {
-		return nil, nil, errors.New("decoding requires at least one fragment")
+		return nil, errors.New("decoding requires at least one fragment")
 	}
 
 	cFrags := C.makeStrArray(C.int(len(frags)))
@@ -187,14 +197,14 @@ func (backend *Backend) Decode(frags [][]byte) ([]byte, func(), error) {
 		backend.libecDesc, cFrags, C.int(len(frags)),
 		C.uint64_t(len(frags[0])), C.int(1),
 		&data, &dataLength); rc != 0 {
-		return nil, nil, fmt.Errorf("decode() returned %v", errToName(-rc))
+		return nil, fmt.Errorf("decode() returned %v", errToName(-rc))
 	}
 	runtime.KeepAlive(frags) // prevent frags from being GC-ed during decode
 
-	return (*[1 << 30]byte)(unsafe.Pointer(data))[:int(dataLength):int(dataLength)],
-		func() {
-			C.liberasurecode_decode_cleanup(backend.libecDesc, data)
-		},
+	return &DecodeData{(*[1 << 30]byte)(unsafe.Pointer(data))[:int(dataLength):int(dataLength)],
+			func() {
+				C.liberasurecode_decode_cleanup(backend.libecDesc, data)
+			}},
 		nil
 }
 

@@ -143,13 +143,14 @@ func TestEncodeDecode(t *testing.T) {
 			continue
 		}
 		for patternIndex, pattern := range testPatterns {
-			frags, fin, err := backend.Encode(pattern)
+			data, err := backend.Encode(pattern)
 			if err != nil {
 				t.Errorf("Error encoding %v: %q", params, err)
 				break
 			}
 
 			expectedVersion := GetVersion()
+			frags := data.Data
 			for index, frag := range frags {
 				info := GetFragmentInfo(frag)
 				if info.Index != index {
@@ -173,15 +174,15 @@ func TestEncodeDecode(t *testing.T) {
 			}
 
 			decode := func(frags [][]byte, description string) bool {
-				data, fin2, err := backend.Decode(frags)
+				decoded, err := backend.Decode(frags)
 				if err != nil {
 					t.Errorf("%v: %v: %q for pattern %d", description, backend, err, patternIndex)
 					return false
-				} else if !bytes.Equal(data, pattern) {
-					t.Errorf("%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, data)
+				} else if !bytes.Equal(decoded.Data, pattern) {
+					t.Errorf("%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, decoded.Data)
 					return false
 				}
-				fin2()
+				decoded.Free()
 				return true
 			}
 
@@ -196,10 +197,10 @@ func TestEncodeDecode(t *testing.T) {
 			if !good {
 				break
 			}
-			fin()
+			data.Free()
 		}
 
-		if _, _, err := backend.Decode([][]byte{}); err == nil {
+		if _, err := backend.Decode([][]byte{}); err == nil {
 			t.Errorf("Expected error when decoding from empty fragment array")
 		}
 
@@ -222,7 +223,8 @@ func TestReconstruct(t *testing.T) {
 			continue
 		}
 		for patternIndex, pattern := range testPatterns {
-			frags, fin, err := backend.Encode(pattern)
+			data, err := backend.Encode(pattern)
+			frags := data.Data
 			if err != nil {
 				t.Errorf("Error encoding %v: %q", params, err)
 			}
@@ -245,7 +247,7 @@ func TestReconstruct(t *testing.T) {
 			if !good {
 				break
 			}
-			fin()
+			data.Free()
 		}
 
 		if _, err := backend.Reconstruct([][]byte{}, 0); err == nil {
@@ -271,11 +273,12 @@ func TestIsInvalidFragment(t *testing.T) {
 			continue
 		}
 		for patternIndex, pattern := range testPatterns {
-			frags, fin, err := backend.Encode(pattern)
+			data, err := backend.Encode(pattern)
 			if err != nil {
 				t.Errorf("Error encoding %v: %q", params, err)
 				continue
 			}
+			frags := data.Data
 			for index, frag := range frags {
 				if backend.IsInvalidFragment(frag) {
 					t.Errorf("%v: frag %v unexpectedly invalid for pattern %d", backend, index, patternIndex)
@@ -370,7 +373,7 @@ func TestIsInvalidFragment(t *testing.T) {
 					}
 				}
 			}
-			fin()
+			data.Free()
 		}
 		err = backend.Close()
 		if err != nil {
@@ -434,13 +437,14 @@ func TestGC(t *testing.T) {
 		}{
 			"Reconstruct",
 			func() {
-				vect, fin, err := backend.Encode(input)
+				encoded, err := backend.Encode(input)
 
 				if err != nil {
 					t.Fatal("cannot encode data")
 					return
 				}
-				defer fin()
+				vect := encoded.Data
+				defer encoded.Free()
 
 				oldData := vect[0][:] // force a copy
 
@@ -462,21 +466,22 @@ func TestGC(t *testing.T) {
 		}{
 			"Decode",
 			func() {
-				vect, fin, err := backend.Encode(input)
+				encoded, err := backend.Encode(input)
 
 				if err != nil {
 					t.Fatal("cannot encode data")
 					return
 				}
-				defer fin()
+				defer encoded.Free()
+				vect := encoded.Data
 
-				data, fin2, err := backend.Decode(vect[0:2])
+				decoded, err := backend.Decode(vect[0:2])
 				if err != nil {
 					t.Fatalf("cannot decode data: %v", err)
 					return
 				}
-				defer fin2()
-
+				defer decoded.Free()
+				data := decoded.Data
 				if len(data) != len(input) {
 					t.Fatal("decoding failed")
 					return
@@ -520,28 +525,28 @@ func BenchmarkEncode(b *testing.B) {
 	buf := bytes.Repeat([]byte("A"), 1024*1024)
 
 	for i := 0; i < b.N; i++ {
-		_, fin, err := backend.Encode(buf)
+		encoded, err := backend.Encode(buf)
 
 		if err != nil {
 			b.Fatal(err)
 		}
-		fin()
+		encoded.Free()
 	}
 }
 func BenchmarkDecode(b *testing.B) {
 	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 5, M: 1, W: 8, HD: 5})
 
 	buf := bytes.Repeat([]byte("A"), 1024*1024)
-	vect, fin, _ := backend.Encode(buf)
+	res, _ := backend.Encode(buf)
 
-	defer fin()
+	defer res.Free()
 
 	for i := 0; i < b.N; i++ {
-		_, fin2, err := backend.Decode(vect)
+		decoded, err := backend.Decode(res.Data)
 
 		if err != nil {
 			b.Fatal(err)
 		}
-		fin2()
+		decoded.Free()
 	}
 }
