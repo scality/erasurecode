@@ -16,6 +16,21 @@ jobs:
     - name: Check out code into the Go module directory
       uses: actions/checkout@v1
 
+    - name: Install Yaml
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install yasm
+
+    - name: Build isa-l
+      run: |
+        git clone --depth 1 --branch v2.28.0 https://github.com/intel/isa-l.git
+        cd isa-l
+        ./autogen.sh
+        ./configure --prefix=/usr
+        make
+        sudo make install
+        sudo ldconfig
+
     - name: Build liberasurecode
       run: |
         git clone https://github.com/openstack/liberasurecode.git
