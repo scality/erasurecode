@@ -80,7 +80,7 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
     return -1;
   }
 
-
+  int tot_len_sum = 0;
   for (i = 0; i < ctx->k; i++) {
     char *ptr = &ctx->datas[i][nth * one_cell_size];
     fragment_header_t *hdr = (fragment_header_t*)ptr;
@@ -90,7 +90,8 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
           int len_to_copy = ctx->chunk_size;
           if (len_to_copy > dataend - dataoffset) {
                   len_to_copy = dataend - dataoffset;
-          }
+		  }
+		  tot_len_sum += len_to_copy;
           memcpy(ptr, dataoffset, len_to_copy);
         }
         dataoffset += ctx->chunk_size;
@@ -110,7 +111,7 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
       fprintf(stderr, "error encode ret = %d\n", ret);
       return -1;
   } else {
-    ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, ctx->chunk_size, k_ref, m_ref);
+    ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, tot_len_sum, k_ref, m_ref);
     if (ret < 0) {
       fprintf(stderr, "error encode ret = %d\n", ret);
       return -1;
