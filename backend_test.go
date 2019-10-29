@@ -535,6 +535,61 @@ func BenchmarkEncode(b *testing.B) {
 	}
 }
 
+const DefaultChunkSize = 32768
+
+func BenchmarkDecodeM(b *testing.B) {
+	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
+
+	buf := bytes.Repeat([]byte("A"), 1024*1024)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer encoded.Free()
+
+		decoded, err := backend.DecodeMatrix(encoded.Data, DefaultChunkSize)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if decoded != nil {
+			if decoded.Free != nil {
+				decoded.Free()
+			}
+		} else {
+			b.Fatal("decoded is nil")
+		}
+	}
+}
+
+func BenchmarkDecodeMSlow(b *testing.B) {
+	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
+	buf := bytes.Repeat([]byte("A"), 1024*1024)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer encoded.Free()
+
+		decoded, err := backend.decodeMatrixSlow(encoded.Data, DefaultChunkSize)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if decoded != nil {
+			if decoded.Free != nil {
+				decoded.Free()
+			}
+		} else {
+			b.Fatal("decoded is nil")
+		}
+	}
+}
+
 func BenchmarkEncodeM(b *testing.B) {
 	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
 
