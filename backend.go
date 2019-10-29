@@ -10,6 +10,7 @@ package erasurecode
 char ** makeStrArray(int n) { return calloc(n, sizeof (char *)); }
 void freeStrArray(char ** arr) { free(arr); }
 void * getStrArrayItem(char ** arr, int idx) { return arr[idx]; }
+char * getStrOffset(char *ptr, int offset) { return ptr + offset; }
 void setStrArrayItem(char ** arr, int idx, unsigned char * val) { arr[idx] = (char *) val; }
 // shims because the fragment headers use misaligned fields
 uint64_t getOrigDataSize(struct fragment_header_s *header) { return header->meta.orig_data_size; }
@@ -17,6 +18,70 @@ uint32_t getBackendVersion(struct fragment_header_s *header) { return header->me
 ec_backend_id_t getBackendID(struct fragment_header_s *header) { return header->meta.backend_id; }
 uint32_t getECVersion(struct fragment_header_s *header) { return header->libec_version; }
 int getHeaderSize() { return sizeof(struct fragment_header_s); }
+int is_null(char *ptr) { return ptr == NULL; }
+
+char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uint64_t *outlen)
+{
+        int i;
+        int curr_idx = 0;
+        int orig_data_size = -1;
+        char *frags[k];
+        // cannot decode fastly
+        if (inlen < k) {
+            return NULL;
+        }
+        if (dest == NULL || outlen == NULL) {
+            return NULL;
+        }
+        memset(frags, 0, sizeof(frags));
+        for (i = 0; i < inlen && curr_idx != k; i++) {
+                int index;
+                int data_size;
+                if (is_invalid_fragment_header((fragment_header_t*)in[i])) {
+                    continue;
+                }
+                index = get_fragment_idx(in[i]);
+                data_size = get_fragment_payload_size(in[i]);
+                if (index < 0 || data_size < 0) {
+                    continue;
+                }
+                if (orig_data_size < 0) {
+                    orig_data_size = get_orig_data_size(in[i]);
+                } else if(get_orig_data_size(in[i]) != orig_data_size) {
+                    continue;
+                }
+                if (index >= k) {
+                    continue;
+                }
+                if (frags[index] == NULL) {
+                    curr_idx ++;
+                    frags[index] = in[i];
+                }
+        }
+
+        if (curr_idx != k) {
+            return NULL;
+        }
+
+        int tocopy = orig_data_size;
+        int string_off = 0;
+        *outlen = orig_data_size;
+        if(destlen < orig_data_size) {
+            *outlen = destlen;
+            tocopy = destlen;
+        }
+
+        for (i = 0; i < k && tocopy > 0; i++) {
+            char *f = get_data_ptr_from_fragment(frags[i]);
+            int fsize = get_fragment_payload_size(frags[i]);
+            int psize = tocopy > fsize ? fsize : tocopy;
+            memcpy(dest + string_off, f, psize);
+            tocopy -= psize;
+            string_off += psize;
+        }
+        return dest;
+}
+
 
 struct encode_chunk_context {
   ec_backend_t instance; // backend instance
@@ -138,9 +203,9 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"unsafe"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 )
 
 type Version struct {
@@ -311,43 +376,133 @@ func (backend *Backend) EncodeMatrix(data []byte, chunkSize int) (*EncodeData, e
 	wg.Add(int(ctx.number_of_subgroup))
 	var errCounter uint64
 	for i := 0; i < int(ctx.number_of_subgroup); i++ {
-			go func(nth int) {
-					defer wg.Done()
-					r := C.encode_chunk(backend.libecDesc, pData, pDataLen, &ctx, C.int(nth))
-					if r < 0 {
-							atomic.AddUint64(&errCounter, 1)
-					}
-			}(i)
+		go func(nth int) {
+			defer wg.Done()
+			r := C.encode_chunk(backend.libecDesc, pData, pDataLen, &ctx, C.int(nth))
+			if r < 0 {
+				atomic.AddUint64(&errCounter, 1)
+			}
+		}(i)
 	}
 	wg.Wait()
 
 	if errCounter != 0 {
-			return &EncodeData{nil, func() {
-					C.liberasurecode_encode_cleanup(
-							backend.libecDesc, ctx.datas, ctx.codings) }},
-					fmt.Errorf("error encoding chunk (%+v encoding failed)", errCounter)
+		return &EncodeData{nil, func() {
+				C.liberasurecode_encode_cleanup(
+					backend.libecDesc, ctx.datas, ctx.codings)
+			}},
+			fmt.Errorf("error encoding chunk (%+v encoding failed)", errCounter)
 	}
 	result := make([][]byte, backend.K+backend.M)
 	fragLen := ctx.frags_len
 	for i := 0; i < backend.K; i++ {
-			result[i] = (*[1 << 30]byte)(unsafe.Pointer(C.getStrArrayItem(ctx.datas, C.int(i))))[:int(C.int(fragLen)):int(C.int(fragLen))]
+		result[i] = (*[1 << 30]byte)(unsafe.Pointer(C.getStrArrayItem(ctx.datas, C.int(i))))[:int(C.int(fragLen)):int(C.int(fragLen))]
 
 	}
 	for i := 0; i < backend.M; i++ {
-			result[i+backend.K] = (*[1 << 30]byte)(unsafe.Pointer(C.getStrArrayItem(ctx.codings, C.int(i))))[:int(C.int(fragLen)):int(C.int(fragLen))]
+		result[i+backend.K] = (*[1 << 30]byte)(unsafe.Pointer(C.getStrArrayItem(ctx.codings, C.int(i))))[:int(C.int(fragLen)):int(C.int(fragLen))]
 	}
 
-
 	return &EncodeData{result, func() {
-			C.liberasurecode_encode_cleanup(
-					backend.libecDesc, ctx.datas, ctx.codings)
+		C.liberasurecode_encode_cleanup(
+			backend.libecDesc, ctx.datas, ctx.codings)
 	}}, nil
 }
-
 
 type DecodeData struct {
 	Data []byte
 	Free func()
+}
+
+// DecodeMatrix decode all the subchunk of frags, and linearize data
+func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData, error) {
+	var data *C.char
+	var wg sync.WaitGroup
+
+	if len(frags) == 0 {
+		return nil, errors.New("decoding requires at least one fragment")
+	}
+
+	cFrags := C.makeStrArray(C.int(len(frags)))
+	defer C.freeStrArray(cFrags)
+	for index, frag := range frags {
+		C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frag[0]))
+	}
+	lenFrags1 := len(frags[0])
+	lenBlock := piecesize + backend.GetHeaderSize()
+	numBlock := lenFrags1 / lenBlock
+	if numBlock*lenBlock != lenFrags1 {
+		numBlock++
+	}
+
+	// allocate the C final Buffer
+	data = (*C.char)(C.malloc(C.ulong(numBlock * piecesize * backend.K)))
+	var mutex = &sync.Mutex{}
+	errorNb := 0
+	totLen := uint64(0)
+	wg.Add(numBlock)
+
+	for i := 0; i < numBlock; i++ {
+		currBlock := i
+		go func(blockNr int) {
+			cFrags := C.makeStrArray(C.int(len(frags)))
+			defer C.freeStrArray(cFrags)
+			for index, frags := range frags {
+				C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frags[blockNr*lenBlock]))
+			}
+			var outlen C.uint64_t
+			p := C.decode_fast(C.int(backend.K), cFrags, C.int(len(frags)),
+				C.getStrOffset(data, C.int(blockNr*piecesize*backend.K)),
+				C.ulong(piecesize*backend.K), &outlen)
+			mutex.Lock()
+			defer mutex.Unlock()
+			if C.is_null(p) == C.int(1) {
+				errorNb++
+			} else {
+				totLen += uint64(outlen)
+			}
+			wg.Done()
+		}(currBlock)
+	}
+	wg.Wait()
+	if errorNb != 0 {
+		C.free(unsafe.Pointer(data))
+		return backend.decodeMatrixSlow(frags, piecesize)
+	}
+
+	return &DecodeData{(*[1 << 30]byte)(unsafe.Pointer(data))[:int(totLen):int(totLen)],
+			func() {
+				C.liberasurecode_decode_cleanup(backend.libecDesc, data)
+			}},
+		nil
+
+}
+
+// decodeMatrixSlow is a fallback when something went wrong with decodeMatrix (especially when data part is missing)
+func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*DecodeData, error) {
+	lenData := len(frags[0])
+	blockSize := piecesize + backend.GetHeaderSize()
+	blockNr := lenData / blockSize
+	if blockNr*blockSize != lenData {
+				blockNr++
+	}
+	data := make([]byte, 0)
+
+	cellSize := piecesize + backend.GetHeaderSize()
+
+	for i := 0; i < blockNr; i++ {
+		var vect [][]byte
+		for j := 0; j < len(frags); j++ {
+			vect = append(vect, frags[j][i * cellSize : (i+1)* cellSize])
+		}
+		subdata, err := backend.Decode(vect)
+		if err != nil {
+			return nil, fmt.Errorf("error subdecoding %d cause =%v", i, err)
+		}
+		data = append(data, subdata.Data...)
+		subdata.Free()
+	}
+	return &DecodeData{data, nil}, nil
 }
 
 func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {

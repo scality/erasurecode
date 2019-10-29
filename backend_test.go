@@ -595,54 +595,38 @@ func TestEncodeM(t *testing.T) {
 				t.Errorf("failed to encode %+v", err)
 			}
 
-			getRange := p[1]
-			blockSize := (p[0]) * backend.K
-			blockNr := getRange / blockSize
-			if blockNr*blockSize != getRange {
-				blockNr++
-			}
-			data := make([]byte, 0)
-
-			cellSize := param[0] + backend.GetHeaderSize()
-			// this is what we should get from our request
-			containerD0 := result.Data[0][0 : blockNr*cellSize]
-			containerD1 := result.Data[1][0 : blockNr*cellSize]
-
-			containerC0 := result.Data[4][0 : blockNr*cellSize]
-			containerC1 := result.Data[5][0 : blockNr*cellSize]
-
-			for i := 0; i < blockNr; i++ {
-				var vect [][]byte
-				subContainerD0 := containerD0[i*cellSize : (i+1)*cellSize]
-				subContainerD1 := containerD1[i*cellSize : (i+1)*cellSize]
-
-				subContainerC0 := containerC0[i*cellSize : (i+1)*cellSize]
-				subContainerC1 := containerC1[i*cellSize : (i+1)*cellSize]
-				// we simulate the loss of datapart 2 & 3
-				vect = append(vect, subContainerD0)
-				vect = append(vect, subContainerD1)
-
-				vect = append(vect, subContainerC0)
-				vect = append(vect, subContainerC1)
-
-				subdata, err := backend.Decode(vect)
-				if err != nil {
-					t.Errorf("error subdecoding %d cause=%v", i, err)
-				}
-				data = append(data, subdata.Data...)
-
-				subdata.Free()
+			ddata, err := backend.DecodeMatrix(result.Data, p[0])
+			if ok := checkData(ddata.Data); ok == false {
+				t.Errorf("bad matrix decoding")
 			}
 
-			for i := 0; i < len(data)-1; i++ {
-				if data[i] != 'Z' {
-					if data[i] != data[i+1]-1 {
-						t.Errorf("bad reconstruction at offset %d", i)
-					}
-				} else if data[i+1] != 'A' {
-					t.Errorf("bad reconstruction at offset %d", i)
-				}
+			defer ddata.Free()
+
+			/* now do the same but with the slow path*/
+			/* we will run a matrix decoding but withtout some data part, to enforce repairing*/
+			var vect [][]byte
+			vect = append(vect, result.Data[2])
+			vect = append(vect, result.Data[3])
+			vect = append(vect, result.Data[4])
+			vect = append(vect, result.Data[5])
+
+			ddata2, err := backend.decodeMatrixSlow(vect, p[0])
+			if ok := checkData(ddata2.Data); ok == false {
+				t.Errorf("bad matrix repairing")
 			}
 		})
 	}
+}
+
+func checkData(data []byte) bool {
+	for i := 0; i < len(data)-1; i++ {
+		if data[i] != 'Z' {
+			if data[i] != data[i+1]-1 {
+				return false
+			}
+		} else if data[i+1] != 'A' {
+			return false
+		}
+	}
+	return true
 }
