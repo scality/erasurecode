@@ -2,6 +2,7 @@ package erasurecode
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"testing"
@@ -520,10 +521,10 @@ func TestAvailableBackends(t *testing.T) {
 }
 
 func BenchmarkEncode(b *testing.B) {
-	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 5, M: 1, W: 8, HD: 5})
+	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
 
 	buf := bytes.Repeat([]byte("A"), 1024*1024)
-
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		encoded, err := backend.Encode(buf)
 
@@ -539,6 +540,7 @@ func BenchmarkEncodeM(b *testing.B) {
 
 	buf := bytes.Repeat([]byte("A"), 1024*1024)
 
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		encoded, err := backend.EncodeMatrix(buf, 32768)
 
@@ -578,62 +580,69 @@ func TestEncodeM(t *testing.T) {
 	for i := 0; i < len(buf); i++ {
 		buf[i] = byte(65 + i%26)
 	}
-	result, err := backend.EncodeMatrix(buf, 4097)
 
-	defer result.Free()
+	testParams := [][]int{{4096, 4097}, {4097, 4096}, {4096, len(buf)}, {4096, 4096}}
 
-	if err != nil {
-		t.Errorf("failed to encode %+v", err)
-	}
+	for _, param := range testParams {
+		p := param
+		testName := fmt.Sprintf("TestEncodeB-%d-%d", p[0], p[1])
+		t.Run(testName, func(t *testing.T) {
+			result, err := backend.EncodeMatrix(buf, p[0])
 
-	/* now we will decode the first 80000bytes */
-	getRange := 1024 * 1024
-	blockSize := (4097) * backend.K
-	blockNr := getRange / blockSize
-	if blockNr*blockSize != getRange {
-		blockNr++
-	}
-	data := make([]byte, 0)
+			defer result.Free()
 
-	cellSize := 4097 + 80
-	// this is what we should get from our request
-	containerD0 := result.Data[0][0 : blockNr*cellSize]
-	containerD1 := result.Data[1][0 : blockNr*cellSize]
-
-	containerC0 := result.Data[4][0 : blockNr*cellSize]
-	containerC1 := result.Data[5][0 : blockNr*cellSize]
-
-	for i := 0; i < blockNr; i++ {
-		var vect [][]byte
-		subContainerD0 := containerD0[i*cellSize : (i+1)*cellSize]
-		subContainerD1 := containerD1[i*cellSize : (i+1)*cellSize]
-
-		subContainerC0 := containerC0[i*cellSize : (i+1)*cellSize]
-		subContainerC1 := containerC1[i*cellSize : (i+1)*cellSize]
-		// we simulate the loss of datapart 2 & 3
-		vect = append(vect, subContainerD0)
-		vect = append(vect, subContainerD1)
-
-		vect = append(vect, subContainerC0)
-		vect = append(vect, subContainerC1)
-
-		subdata, err := backend.Decode(vect)
-		if err != nil {
-			t.Errorf("error subdecoding %d cause=%v", i, err)
-		}
-		data = append(data, subdata.Data...)
-
-		subdata.Free()
-	}
-
-	for i := 0; i < len(data)-1; i++ {
-		if data[i] != 'Z' {
-			if data[i] != data[i+1]-1 {
-				t.Errorf("bad reconstruction at offset %d", i)
+			if err != nil {
+				t.Errorf("failed to encode %+v", err)
 			}
-		} else if data[i+1] != 'A' {
-			t.Errorf("bad reconstruction at offset %d", i)
-		}
-	}
 
+			getRange := p[1]
+			blockSize := (p[0]) * backend.K
+			blockNr := getRange / blockSize
+			if blockNr*blockSize != getRange {
+				blockNr++
+			}
+			data := make([]byte, 0)
+
+			cellSize := param[0] + backend.GetHeaderSize()
+			// this is what we should get from our request
+			containerD0 := result.Data[0][0 : blockNr*cellSize]
+			containerD1 := result.Data[1][0 : blockNr*cellSize]
+
+			containerC0 := result.Data[4][0 : blockNr*cellSize]
+			containerC1 := result.Data[5][0 : blockNr*cellSize]
+
+			for i := 0; i < blockNr; i++ {
+				var vect [][]byte
+				subContainerD0 := containerD0[i*cellSize : (i+1)*cellSize]
+				subContainerD1 := containerD1[i*cellSize : (i+1)*cellSize]
+
+				subContainerC0 := containerC0[i*cellSize : (i+1)*cellSize]
+				subContainerC1 := containerC1[i*cellSize : (i+1)*cellSize]
+				// we simulate the loss of datapart 2 & 3
+				vect = append(vect, subContainerD0)
+				vect = append(vect, subContainerD1)
+
+				vect = append(vect, subContainerC0)
+				vect = append(vect, subContainerC1)
+
+				subdata, err := backend.Decode(vect)
+				if err != nil {
+					t.Errorf("error subdecoding %d cause=%v", i, err)
+				}
+				data = append(data, subdata.Data...)
+
+				subdata.Free()
+			}
+
+			for i := 0; i < len(data)-1; i++ {
+				if data[i] != 'Z' {
+					if data[i] != data[i+1]-1 {
+						t.Errorf("bad reconstruction at offset %d", i)
+					}
+				} else if data[i+1] != 'A' {
+					t.Errorf("bad reconstruction at offset %d", i)
+				}
+			}
+		})
+	}
 }

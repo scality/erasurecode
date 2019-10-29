@@ -30,6 +30,14 @@ struct encode_chunk_context {
   int m;
 };
 
+// instead of encoding K blocks of data, we divide and subencode blocks of
+// 'piecesize' bytes.
+// desc  : liberasurecode handle
+// data : the whole data to encode
+// datalen : the datalen
+// piecesize : the size of little blocks used for encoding
+// ctx : contains informations such as the ECN schema (see below)
+//
 void encode_chunk_prepare(int desc,
                           char *data,
                           int datalen,
@@ -41,6 +49,7 @@ void encode_chunk_prepare(int desc,
   const int k = ctx->instance->args.uargs.k;
   const int m = ctx->instance->args.uargs.m;
 
+  // here we compute the number of (k) subgroup of 'piecesize' bytes we can create
   int block_size = piecesize * k;
   ctx->number_of_subgroup = datalen / block_size;
   if(ctx->number_of_subgroup * block_size != datalen) {
@@ -281,6 +290,12 @@ func (backend *Backend) Encode(data []byte) (*EncodeData, error) {
 		C.liberasurecode_encode_cleanup(
 			backend.libecDesc, dataFrags, parityFrags)
 	}}, nil
+}
+
+// GetHeaderSize returns the size of the header written by liberasurecode before each chunks
+func (backend *Backend) GetHeaderSize() int {
+	r := int(C.getHeaderSize())
+	return r
 }
 
 // EncodeMatrix encodes data in small subpart of chunkSize bytes
