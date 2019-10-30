@@ -20,6 +20,16 @@ uint32_t getECVersion(struct fragment_header_s *header) { return header->libec_v
 int getHeaderSize() { return sizeof(struct fragment_header_s); }
 int is_null(char *ptr) { return ptr == NULL; }
 
+// decode_fast is used when we have all data fragment. Instead of doing a true decoding, we just
+// reassemble all the fragment linearized in a buffer. This is mainly a copy of liberasurecode
+// fragment_to_string function, excepted that we won't do any addionnal allocation
+// k is the number of expected data fragment
+// in is an array of all frags
+// inlen is the array size
+// dest is an already allocated buffer where data will be linearized
+// destlen is the buffer size, and hence, the maximum number of bytes linearized
+// outlen is a pointer containing the number of bytes really linearized in dest (always lower or equal to destlen)
+// it returns dest if nothing went wrong, else null
 char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uint64_t *outlen)
 {
         int i;
@@ -33,7 +43,9 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
         if (dest == NULL || outlen == NULL) {
             return NULL;
         }
-        memset(frags, 0, sizeof(frags));
+		memset(frags, 0, sizeof(frags));
+		// we start by iterating on all fragment, and ordering according to the fragment index
+		// in the header all data fragment (fragment whose index is lower than k)
         for (i = 0; i < inlen && curr_idx != k; i++) {
                 int index;
                 int data_size;
@@ -58,11 +70,13 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
                     frags[index] = in[i];
                 }
         }
-
+		// if we don't have enough data fragment, we leave this function and will probably
+		// fallback on a true deocodin function 
         if (curr_idx != k) {
             return NULL;
         }
 
+		// compute how number of bytes will be linearized
         int tocopy = orig_data_size;
         int string_off = 0;
         *outlen = orig_data_size;
@@ -71,6 +85,7 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
             tocopy = destlen;
         }
 
+		// copy in an ordered way all bytes of fragments in the buffer
         for (i = 0; i < k && tocopy > 0; i++) {
             char *f = get_data_ptr_from_fragment(frags[i]);
             int fsize = get_fragment_payload_size(frags[i]);
@@ -140,6 +155,17 @@ void encode_chunk_prepare(int desc,
 
 }
 
+// encode_chunk will encode a subset of the fragments data.
+// It has to be considered that all the datas will not be divided in K blocks, but instead,
+// they will be divided in N sub-blocks of K*chunksize fragments
+// [-------------------data---------------------]
+// {s1a | s1b | s1c | s1d}{s2a | s2b | s2c |d2d }
+// fragment1 => [header1a|s1a|header2a|s2a]
+// fragment2 => [header1b]s1b|header2b|s2b]
+// fragment3 => [header1c]s1c|header2c|s2c]
+// fragment4 => [header1d]s1d|header2d|s2d]
+// this mapping will let be more efficient against get range pattern (when we are only interesting in
+// having a small subset of data) especially when a whole fragment will be missing
 int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context *ctx, int nth)
 {
   ec_backend_t ec = ctx->instance;
@@ -154,6 +180,7 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
     return -1;
   }
 
+  // Do the mapping as described above
   int tot_len_sum = 0;
   for (i = 0; i < ctx->k; i++) {
     char *ptr = &ctx->datas[i][nth * one_cell_size];
@@ -180,11 +207,13 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
     m_ref[i] = ptr;
   }
 
+  // do the true encoding according the backend used (isa-l, cauchy ....)
   ret = ec->common.ops->encode(ec->desc.backend_desc, k_ref, m_ref, ctx->chunk_size);
   if (ret < 0) {
       fprintf(stderr, "error encode ret = %d\n", ret);
       return -1;
   } else {
+	// fill the headers with true len, fragment len ....
     ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, tot_len_sum, k_ref, m_ref);
     if (ret < 0) {
       fprintf(stderr, "error encode ret = %d\n", ret);
@@ -193,8 +222,6 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
   }
   return 0;
 }
-
-
 */
 import "C"
 
@@ -208,6 +235,7 @@ import (
 	"unsafe"
 )
 
+// Version describes the module version
 type Version struct {
 	Major    uint
 	Minor    uint
@@ -218,6 +246,7 @@ func (v Version) String() string {
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Revision)
 }
 
+// Less compares two versions
 func (v Version) Less(other Version) bool {
 	if v.Major < other.Major {
 		return true
@@ -229,6 +258,7 @@ func (v Version) Less(other Version) bool {
 	return false
 }
 
+// GetVersion return a structure describing the version of the module
 func GetVersion() Version {
 	return makeVersion(C.liberasurecode_get_version())
 }
@@ -240,6 +270,7 @@ func makeVersion(v C.uint32_t) Version {
 	}
 }
 
+// KnownBackends is a slice of all compatible backends
 var KnownBackends = [...]string{
 	"null",
 	"jerasure_rs_vand",
@@ -252,6 +283,7 @@ var KnownBackends = [...]string{
 	"libphazr",
 }
 
+// AvailableBackends fill a slice of all usable backends
 func AvailableBackends() (avail []string) {
 	for _, name := range KnownBackends {
 		if BackendIsAvailable(name) {
@@ -261,6 +293,7 @@ func AvailableBackends() (avail []string) {
 	return
 }
 
+// Params describe the encoding/decoding parameters
 type Params struct {
 	Name string
 	K    int
@@ -269,11 +302,13 @@ type Params struct {
 	HD   int
 }
 
+// Backend is a wrapper of a backend descriptor of liberasurecode
 type Backend struct {
 	Params
 	libecDesc C.int
 }
 
+// BackendIsAvailable check a backend availability
 func BackendIsAvailable(name string) bool {
 	id, err := nameToID(name)
 	if err != nil {
@@ -282,6 +317,7 @@ func BackendIsAvailable(name string) bool {
 	return C.liberasurecode_backend_available(id) != 0
 }
 
+// InitBackend returns a backend descriptor according params provided
 func InitBackend(params Params) (Backend, error) {
 	backend := Backend{params, 0}
 	id, err := nameToID(backend.Name)
@@ -315,6 +351,7 @@ func InitBackend(params Params) (Backend, error) {
 	return backend, nil
 }
 
+// Close cleans a backend descriptor
 func (backend *Backend) Close() error {
 	if backend.libecDesc == 0 {
 		return errors.New("backend already closed")
@@ -326,11 +363,14 @@ func (backend *Backend) Close() error {
 	return nil
 }
 
+// EncodeData is returned by all encode* functions
 type EncodeData struct {
-	Data [][]byte
-	Free func()
+	Data [][]byte // Slice of []bytes ==> our K+N encoded fragments
+	Free func()   // cleanup closure (to free C allocated data once it becomes useless)
 }
 
+// Encode is the general purpose encoding function. It encodes data according
+// backend params and returns an EncodeData structure containing the Fragments
 func (backend *Backend) Encode(data []byte) (*EncodeData, error) {
 	var dataFrags **C.char
 	var parityFrags **C.char
@@ -409,6 +449,10 @@ func (backend *Backend) EncodeMatrix(data []byte, chunkSize int) (*EncodeData, e
 	}}, nil
 }
 
+// DecodeData is the structure returned by all Decode* function
+// It contains a linearized data buffer and a Free closure (that can be null)
+// that clean some C dynamically allocated objects
+// If Free is not null, the closure should be used only when the Data is not needed anymore
 type DecodeData struct {
 	Data []byte
 	Free func()
@@ -444,12 +488,17 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 
 	for i := 0; i < numBlock; i++ {
 		currBlock := i
+		// launch goroutines, providing them a subrange of the final buffer so it can be used
+		// in concurrency without need to lock it access
 		go func(blockNr int) {
 			cFrags := C.makeStrArray(C.int(len(frags)))
 			defer C.freeStrArray(cFrags)
+			// prepare the C array of pointer, respecting the offset in each fragments
 			for index, frags := range frags {
 				C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frags[blockNr*lenBlock]))
 			}
+			// try to decode fastly (if we have all data fragments), providing the good offset of the
+			// linearized buffer, according the block number we are decoding
 			var outlen C.uint64_t
 			p := C.decode_fast(C.int(backend.K), cFrags, C.int(len(frags)),
 				C.getStrOffset(data, C.int(blockNr*piecesize*backend.K)),
@@ -465,11 +514,14 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 		}(currBlock)
 	}
 	wg.Wait()
+	// if we got some issues, fallback on "slow" decoding
 	if errorNb != 0 {
 		C.free(unsafe.Pointer(data))
 		return backend.decodeMatrixSlow(frags, piecesize)
 	}
 
+	// return our linearized data. Closure expect to free the C allocated data once
+	// the DecodeData.Data will not be used anymore
 	return &DecodeData{(*[1 << 30]byte)(unsafe.Pointer(data))[:int(totLen):int(totLen)],
 			func() {
 				C.liberasurecode_decode_cleanup(backend.libecDesc, data)
@@ -505,6 +557,7 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 	return &DecodeData{data, nil}, nil
 }
 
+// Decode is the general purpose decoding function (without sub-chunking)
 func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 	var data *C.char
 	var dataLength C.uint64_t
@@ -533,6 +586,7 @@ func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 		nil
 }
 
+// Reconstruct rebuild a missing fragment
 func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, error) {
 	if len(frags) == 0 {
 		return nil, errors.New("reconstruction requires at least one fragment")
@@ -556,11 +610,14 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 	return data, nil
 }
 
+// IsInvalidFragment is a wrapper on C implementation
+// it checks that a fragment is not valid, according its header
 func (backend *Backend) IsInvalidFragment(frag []byte) bool {
 	pData := (*C.char)(unsafe.Pointer(&frag[0]))
 	return 1 == C.is_invalid_fragment(backend.libecDesc, pData)
 }
 
+// FragmentInfo is a wrapper of fragment_header C struct
 type FragmentInfo struct {
 	Index               int
 	Size                int
@@ -573,6 +630,7 @@ type FragmentInfo struct {
 	IsValid             bool
 }
 
+// GetFragmentInfo is the wrapper of the C implementation
 func GetFragmentInfo(frag []byte) FragmentInfo {
 	header := *(*C.struct_fragment_header_s)(unsafe.Pointer(&frag[0]))
 	backendID := C.getBackendID(&header)

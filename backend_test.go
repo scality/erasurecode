@@ -636,12 +636,15 @@ func TestEncodeM(t *testing.T) {
 		buf[i] = byte(65 + i%26)
 	}
 
+	// All our sub tests case. Each {X,Y} represents respecitvely the chunking unit (size of each subpart)
+	// and the data we want to read when we decode
 	testParams := [][]int{{4096, 4097}, {4097, 4096}, {4096, len(buf)}, {4096, 4096}}
 
 	for _, param := range testParams {
 		p := param
 		testName := fmt.Sprintf("TestEncodeB-%d-%d", p[0], p[1])
 		t.Run(testName, func(t *testing.T) {
+			// Do the matrix encoding
 			result, err := backend.EncodeMatrix(buf, p[0])
 
 			defer result.Free()
@@ -650,6 +653,9 @@ func TestEncodeM(t *testing.T) {
 				t.Errorf("failed to encode %+v", err)
 			}
 
+			// Do the matrix decoding. It should work fastly because we have
+			// all data fragments. After, we check that our linearized buffer
+			// contains expected data
 			ddata, err := backend.DecodeMatrix(result.Data, p[0])
 			if ok := checkData(ddata.Data); ok == false {
 				t.Errorf("bad matrix decoding")
@@ -682,6 +688,7 @@ func TestEncodeM(t *testing.T) {
 	}
 }
 
+// checkData reads a buffer and check that we have a round robin sequence of [A-Z] characters
 func checkData(data []byte) bool {
 	for i := 0; i < len(data)-1; i++ {
 		if data[i] != 'Z' {

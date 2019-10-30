@@ -11,7 +11,7 @@ import (
 	"io"
 	"os"
 )
-
+// ECWriter is an implementation of Writer interface
 type ECWriter struct {
 	Backend *Backend
 	Writers []io.WriteCloser
@@ -49,6 +49,7 @@ func (shim ECWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Close closes the writer
 func (shim ECWriter) Close() error {
 	var firstErr error
 	for _, writer := range shim.Writers {
@@ -60,6 +61,7 @@ func (shim ECWriter) Close() error {
 	return firstErr
 }
 
+// GetFileWriter returns a struct containing the backend and the associated writers
 func (backend *Backend) GetFileWriter(prefix string, perm os.FileMode) (io.WriteCloser, error) {
 	writers, err := getWriters(prefix, uint8(backend.K+backend.M), perm)
 	if err != nil {
@@ -68,6 +70,7 @@ func (backend *Backend) GetFileWriter(prefix string, perm os.FileMode) (io.Write
 	return ECWriter{backend, writers}, nil
 }
 
+// ReadFragment is a stream reader, returning a slice containing fragment with its header
 func ReadFragment(reader io.Reader) ([]byte, error) {
 	header := make([]byte, C.sizeof_struct_fragment_header_s)
 	n, err := io.ReadFull(reader, header)
