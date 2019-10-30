@@ -554,7 +554,24 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 		data = append(data, subdata.Data...)
 		subdata.Free()
 	}
-	return &DecodeData{data, nil}, nil
+	return &DecodeData{data, func(){}}, nil
+}
+
+// GetRangeMatrix returns the bounds of each data fragments to get to satisfy
+// {start, end} range
+func (backend *Backend) GetRangeMatrix(start, end, chunksize int) (int, int) {
+	blockSize := chunksize
+	groupSize := blockSize * backend.K
+
+	// start's block number
+	rStart := start / groupSize
+	rEnd   := end / groupSize
+
+	// convert block number to offset
+	rStart = rStart * (chunksize + backend.GetHeaderSize())
+	rEnd = (rEnd + 1) * (chunksize + backend.GetHeaderSize())
+
+	return rStart, rEnd
 }
 
 // Decode is the general purpose decoding function (without sub-chunking)

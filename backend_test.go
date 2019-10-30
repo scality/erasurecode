@@ -580,13 +580,8 @@ func BenchmarkDecodeMSlow(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if decoded != nil {
-			if decoded.Free != nil {
-				decoded.Free()
-			}
-		} else {
-			b.Fatal("decoded is nil")
-		}
+
+		defer decoded.Free()
 	}
 }
 
@@ -700,4 +695,28 @@ func checkData(data []byte) bool {
 		}
 	}
 	return true
+}
+
+func TestMatrixBounds(t *testing.T) {
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 3, M: 1, W: 8, HD: 5})
+
+	if err != nil {
+		t.Fatalf("cannot init backend: (%v)", err)
+	}
+
+	// All our sub tests case. Each {X,Y} represents respecitvely the chunking unit (size of each subpart)
+	// and the data we want to read when we decode
+	testParams := [][]int{{0, 95, 32, 0, 112}, {10, 97, 32, 0, 224}, {97, 98, 32, 112, 224}, {0, 32*backend.K*2 + 1 + 1, 32, 0, 336}}
+
+	for _, param := range testParams {
+		p := param
+		testName := fmt.Sprintf("TestEMatrixBounds-%d-%d", p[0], p[1])
+		t.Run(testName, func(t *testing.T) {
+			start, end := backend.GetRangeMatrix(p[0], p[1], p[2])
+			if start != p[3] || end != p[4] {
+				t.Errorf("start is %d instead of %d and end is %d instead of %d", start, p[3], end, p[4])
+			}
+
+		})
+	}
 }
