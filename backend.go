@@ -71,7 +71,7 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
                 }
         }
 		// if we don't have enough data fragment, we leave this function and will probably
-		// fallback on a true deocodin function 
+		// fallback on a true deocodin function
         if (curr_idx != k) {
             return NULL;
         }
@@ -536,7 +536,7 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 	blockSize := piecesize + backend.GetHeaderSize()
 	blockNr := lenData / blockSize
 	if blockNr*blockSize != lenData {
-				blockNr++
+		blockNr++
 	}
 	data := make([]byte, 0)
 
@@ -545,7 +545,7 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 	for i := 0; i < blockNr; i++ {
 		var vect [][]byte
 		for j := 0; j < len(frags); j++ {
-			vect = append(vect, frags[j][i * cellSize : (i+1)* cellSize])
+			vect = append(vect, frags[j][i*cellSize:(i+1)*cellSize])
 		}
 		subdata, err := backend.Decode(vect)
 		if err != nil {
@@ -554,7 +554,7 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 		data = append(data, subdata.Data...)
 		subdata.Free()
 	}
-	return &DecodeData{data, func(){}}, nil
+	return &DecodeData{data, func() {}}, nil
 }
 
 // GetRangeMatrix returns the bounds of each data fragments to get to satisfy
@@ -565,7 +565,7 @@ func (backend *Backend) GetRangeMatrix(start, end, chunksize int) (int, int) {
 
 	// start's block number
 	rStart := start / groupSize
-	rEnd   := end / groupSize
+	rEnd := end / groupSize
 
 	// convert block number to offset
 	rStart = rStart * (chunksize + backend.GetHeaderSize())
@@ -624,6 +624,37 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 		return nil, fmt.Errorf("reconstruct_fragment() returned %v", errToName(-rc))
 	}
 	runtime.KeepAlive(frags) // prevent frags from being GC-ed during reconstruct
+	return data, nil
+}
+
+// ReconstructMatrix is a really not optimized yet reconstruction of a frag containing subchunking
+func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksize int) ([]byte, error) {
+	if len(frags) == 0 {
+		return nil, errors.New("reconstruction requires at least one fragment")
+	}
+
+	lenData := len(frags[0])
+	blockSize := chunksize + backend.GetHeaderSize()
+	blockNr := lenData / blockSize
+	if blockNr*blockSize != lenData {
+		blockNr++
+	}
+	data := make([]byte, 0)
+
+	cellSize := chunksize + backend.GetHeaderSize()
+
+	// TODO use goroutines here to leverage multicore computation
+	for i := 0; i < blockNr; i++ {
+		var vect [][]byte
+		for j := 0; j < len(frags); j++ {
+			vect = append(vect, frags[j][i*cellSize:(i+1)*cellSize])
+		}
+		subdata, err := backend.Reconstruct(vect, fragIndex)
+		if err != nil {
+			return nil, fmt.Errorf("error subdecoding %d cause =%v", i, err)
+		}
+		data = append(data, subdata...)
+	}
 	return data, nil
 }
 

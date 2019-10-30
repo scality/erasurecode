@@ -720,3 +720,55 @@ func TestMatrixBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestReconstructM(t *testing.T) {
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
+
+	if err != nil {
+		t.Fatalf("cannot init backend: (%v)", err)
+	}
+
+	buf := make([]byte, 1024*1024)
+	for i := 0; i < len(buf); i++ {
+		buf[i] = byte(65 + i%26)
+	}
+
+	// All our sub tests case. Each {X,Y} represents respecitvely the chunking unit (size of each subpart)
+	// and the fragment number we want to have to reconstruct
+	testParams := [][]int{{4096, 0}, {4096, backend.K}, {DefaultChunkSize, 1}}
+
+	for _, param := range testParams {
+		p := param
+		testName := fmt.Sprintf("TestReconstruct-%d-%d", p[0], p[1])
+		t.Run(testName, func(t *testing.T) {
+			// Do the matrix encoding
+			result, err := backend.EncodeMatrix(buf, p[0])
+
+			defer result.Free()
+
+			if err != nil {
+				t.Errorf("failed to encode %+v", err)
+			}
+
+			var vect [][]byte
+			for i := 0; i < backend.K+backend.M; i++ {
+				if i != p[1] {
+					vect = append(vect, result.Data[i])
+				}
+			}
+
+			fragment, err := backend.ReconstructMatrix(vect, p[1], p[0])
+			if err != nil {
+				t.Errorf("cannot reconstruct fragment %d cause=%v", p[1], err)
+			}
+			if fragment == nil {
+				t.Errorf("unexpected error / fragment rebuilt is nil")
+			}
+
+			res := bytes.Compare(fragment, result.Data[p[1]])
+			if res != 0 {
+				t.Errorf("Error, fragment rebuilt is different from the original one")
+			}
+		})
+	}
+}
