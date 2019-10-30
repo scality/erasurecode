@@ -669,6 +669,15 @@ func TestEncodeM(t *testing.T) {
 			if ok := checkData(ddata2.Data); ok == false {
 				t.Errorf("bad matrix repairing")
 			}
+
+			/*
+			 * now we will do the same but we should failed because the chunksize provided
+			 * to decode the data is not the same used by encode function
+			 */
+			_, err = backend.decodeMatrixSlow(result.Data, p[0]+1)
+			if err == nil {
+				t.Errorf("no error during decoding whereas bad params were provided")
+			}
 		})
 	}
 }
