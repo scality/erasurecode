@@ -18,17 +18,16 @@ uint32_t getBackendVersion(struct fragment_header_s *header) { return header->me
 ec_backend_id_t getBackendID(struct fragment_header_s *header) { return header->meta.backend_id; }
 uint32_t getECVersion(struct fragment_header_s *header) { return header->libec_version; }
 int getHeaderSize() { return sizeof(struct fragment_header_s); }
-int is_null(char *ptr) { return ptr == NULL; }
 
 // decode_fast is used when we have all data fragment. Instead of doing a true decoding, we just
 // reassemble all the fragment linearized in a buffer. This is mainly a copy of liberasurecode
-// fragment_to_string function, excepted that we won't do any addionnal allocation
-// k is the number of expected data fragment
-// in is an array of all frags
-// inlen is the array size
-// dest is an already allocated buffer where data will be linearized
-// destlen is the buffer size, and hence, the maximum number of bytes linearized
-// outlen is a pointer containing the number of bytes really linearized in dest (always lower or equal to destlen)
+// fragment_to_string function, except that we won't do any addionnal allocation
+// 'k' is the number of expected data fragment
+// 'in' is an array of all frags
+// 'inlen' is the array size
+// 'dest' is an already allocated buffer where data will be linearized
+// 'destlen' is the buffer size, and hence, the maximum number of bytes linearized
+// 'outlen' is a pointer containing the number of bytes really linearized in dest (always lower or equal to destlen)
 // it returns dest if nothing went wrong, else null
 char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uint64_t *outlen)
 {
@@ -43,9 +42,9 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
         if (dest == NULL || outlen == NULL) {
             return NULL;
         }
-		memset(frags, 0, sizeof(frags));
-		// we start by iterating on all fragment, and ordering according to the fragment index
-		// in the header all data fragment (fragment whose index is lower than k)
+	memset(frags, 0, sizeof(frags));
+	// we start by iterating on all fragment, and ordering according to the fragment index
+	// in the header all data fragment (fragment whose index is lower than k)
         for (i = 0; i < inlen && curr_idx != k; i++) {
                 int index;
                 int data_size;
@@ -70,13 +69,13 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
                     frags[index] = in[i];
                 }
         }
-		// if we don't have enough data fragment, we leave this function and will probably
-		// fallback on a true deocodin function
+	// if we don't have enough data fragment, we leave this function and will probably
+	// fallback on a true deocodin function
         if (curr_idx != k) {
             return NULL;
         }
 
-		// compute how number of bytes will be linearized
+	// compute how number of bytes will be linearized
         int tocopy = orig_data_size;
         int string_off = 0;
         *outlen = orig_data_size;
@@ -85,7 +84,7 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
             tocopy = destlen;
         }
 
-		// copy in an ordered way all bytes of fragments in the buffer
+	// copy in an ordered way all bytes of fragments in the buffer
         for (i = 0; i < k && tocopy > 0; i++) {
             char *f = get_data_ptr_from_fragment(frags[i]);
             int fsize = get_fragment_payload_size(frags[i]);
@@ -112,11 +111,11 @@ struct encode_chunk_context {
 
 // instead of encoding K blocks of data, we divide and subencode blocks of
 // 'piecesize' bytes.
-// desc  : liberasurecode handle
-// data : the whole data to encode
-// datalen : the datalen
-// piecesize : the size of little blocks used for encoding
-// ctx : contains informations such as the ECN schema (see below)
+// 'desc'  : liberasurecode handle
+// 'data' : the whole data to encode
+// 'datalen' : the datalen
+// 'piecesize' : the size of little blocks used for encoding
+// 'ctx' : contains informations such as the ECN schema (see below)
 //
 void encode_chunk_prepare(int desc,
                           char *data,
@@ -212,13 +211,12 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
   if (ret < 0) {
       fprintf(stderr, "error encode ret = %d\n", ret);
       return -1;
-  } else {
-	// fill the headers with true len, fragment len ....
-    ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, tot_len_sum, k_ref, m_ref);
-    if (ret < 0) {
+  }
+  // fill the headers with true len, fragment len ....
+  ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, tot_len_sum, k_ref, m_ref);
+  if (ret < 0) {
       fprintf(stderr, "error encode ret = %d\n", ret);
       return -1;
-    }
   }
   return 0;
 }
@@ -414,14 +412,14 @@ func (backend *Backend) EncodeMatrix(data []byte, chunkSize int) (*EncodeData, e
 	C.encode_chunk_prepare(backend.libecDesc, pData, pDataLen, cChunkSize, &ctx)
 
 	wg.Add(int(ctx.number_of_subgroup))
-	var errCounter uint64
+	var errCounter uint32
 	for i := 0; i < int(ctx.number_of_subgroup); i++ {
 		go func(nth int) {
-			defer wg.Done()
 			r := C.encode_chunk(backend.libecDesc, pData, pDataLen, &ctx, C.int(nth))
 			if r < 0 {
-				atomic.AddUint64(&errCounter, 1)
+				atomic.AddUint32(&errCounter, 1)
 			}
+			wg.Done()
 		}(i)
 	}
 	wg.Wait()
@@ -472,17 +470,17 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 	for index, frag := range frags {
 		C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frag[0]))
 	}
-	lenFrags1 := len(frags[0])
+	fragLen := len(frags[0])
 	lenBlock := piecesize + backend.GetHeaderSize()
-	numBlock := lenFrags1 / lenBlock
-	if numBlock*lenBlock != lenFrags1 {
+	numBlock := fragLen / lenBlock
+	if numBlock*lenBlock != fragLen {
 		numBlock++
 	}
 
 	// allocate the C final Buffer
 	data = (*C.char)(C.malloc(C.ulong(numBlock * piecesize * backend.K)))
-	var mutex = &sync.Mutex{}
-	errorNb := 0
+
+	errorNb := uint32(0)
 	totLen := uint64(0)
 	wg.Add(numBlock)
 
@@ -503,12 +501,11 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 			p := C.decode_fast(C.int(backend.K), cFrags, C.int(len(frags)),
 				C.getStrOffset(data, C.int(blockNr*piecesize*backend.K)),
 				C.ulong(piecesize*backend.K), &outlen)
-			mutex.Lock()
-			defer mutex.Unlock()
-			if C.is_null(p) == C.int(1) {
-				errorNb++
+
+			if p == nil {
+				atomic.AddUint32(&errorNb, 1)
 			} else {
-				totLen += uint64(outlen)
+				atomic.AddUint64(&totLen, uint64(outlen))
 			}
 			wg.Done()
 		}(currBlock)
@@ -532,10 +529,10 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 
 // decodeMatrixSlow is a fallback when something went wrong with decodeMatrix (especially when data part is missing)
 func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*DecodeData, error) {
-	lenData := len(frags[0])
+	fragLen := len(frags[0])
 	blockSize := piecesize + backend.GetHeaderSize()
-	blockNr := lenData / blockSize
-	if blockNr*blockSize != lenData {
+	blockNr := fragLen / blockSize
+	if blockNr*blockSize != fragLen {
 		blockNr++
 	}
 	data := make([]byte, 0)
@@ -633,10 +630,10 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksi
 		return nil, errors.New("reconstruction requires at least one fragment")
 	}
 
-	lenData := len(frags[0])
+	fragLen := len(frags[0])
 	blockSize := chunksize + backend.GetHeaderSize()
-	blockNr := lenData / blockSize
-	if blockNr*blockSize != lenData {
+	blockNr := fragLen / blockSize
+	if blockNr*blockSize != fragLen {
 		blockNr++
 	}
 	data := make([]byte, 0)

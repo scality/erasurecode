@@ -628,21 +628,25 @@ func TestEncodeM(t *testing.T) {
 
 	buf := make([]byte, 1024*1024)
 	for i := 0; i < len(buf); i++ {
-		buf[i] = byte(65 + i%26)
+		buf[i] = byte('A' + i%26)
 	}
 
-	// All our sub tests case. Each {X,Y} represents respecitvely the chunking unit (size of each subpart)
-	// and the data we want to read when we decode
-	testParams := [][]int{{4096, 4097}, {4097, 4096}, {4096, len(buf)}, {4096, 4096}}
+	testParams := []struct {
+		chunkUnit   int
+		lenToDecode int
+	}{
+		{chunkUnit: 4096, lenToDecode: 4097},
+		{chunkUnit: 4097, lenToDecode: 4096},
+		{chunkUnit: 4096, lenToDecode: len(buf)},
+		{chunkUnit: 4096, lenToDecode: 4096},
+	}
 
 	for _, param := range testParams {
 		p := param
-		testName := fmt.Sprintf("TestEncodeB-%d-%d", p[0], p[1])
+		testName := fmt.Sprintf("TestEncodeB-%d-%d", p.chunkUnit, p.lenToDecode)
 		t.Run(testName, func(t *testing.T) {
 			// Do the matrix encoding
-			result, err := backend.EncodeMatrix(buf, p[0])
-
-			defer result.Free()
+			result, err := backend.EncodeMatrix(buf, p.chunkUnit)
 
 			if err != nil {
 				t.Errorf("failed to encode %+v", err)
@@ -651,12 +655,12 @@ func TestEncodeM(t *testing.T) {
 			// Do the matrix decoding. It should work fastly because we have
 			// all data fragments. After, we check that our linearized buffer
 			// contains expected data
-			ddata, err := backend.DecodeMatrix(result.Data, p[0])
+			ddata, err := backend.DecodeMatrix(result.Data, p.chunkUnit)
 			if ok := checkData(ddata.Data); ok == false {
 				t.Errorf("bad matrix decoding")
 			}
 
-			defer ddata.Free()
+			ddata.Free()
 
 			/* now do the same but with the slow path*/
 			/* we will run a matrix decoding but withtout some data part, to enforce repairing*/
@@ -666,19 +670,22 @@ func TestEncodeM(t *testing.T) {
 			vect = append(vect, result.Data[4])
 			vect = append(vect, result.Data[5])
 
-			ddata2, err := backend.decodeMatrixSlow(vect, p[0])
+			ddata2, err := backend.decodeMatrixSlow(vect, p.chunkUnit)
 			if ok := checkData(ddata2.Data); ok == false {
 				t.Errorf("bad matrix repairing")
 			}
+			ddata2.Free()
 
 			/*
 			 * now we will do the same but we should failed because the chunksize provided
 			 * to decode the data is not the same used by encode function
 			 */
-			_, err = backend.decodeMatrixSlow(result.Data, p[0]+1)
+			_, err = backend.decodeMatrixSlow(result.Data, p.chunkUnit+1)
 			if err == nil {
 				t.Errorf("no error during decoding whereas bad params were provided")
 			}
+
+			result.Free()
 		})
 	}
 }
@@ -704,17 +711,27 @@ func TestMatrixBounds(t *testing.T) {
 		t.Fatalf("cannot init backend: (%v)", err)
 	}
 
-	// All our sub tests case. Each {X,Y} represents respecitvely the chunking unit (size of each subpart)
-	// and the data we want to read when we decode
-	testParams := [][]int{{0, 95, 32, 0, 112}, {10, 97, 32, 0, 224}, {97, 98, 32, 112, 224}, {0, 32*backend.K*2 + 1 + 1, 32, 0, 336}}
+	testParams := []struct {
+		rangeStart    int
+		rangeEnd      int
+		chunkUnit     int
+		expectedStart int
+		expectedEnd   int
+	}{
+		{rangeStart: 0, rangeEnd: 95, chunkUnit: 32, expectedStart: 0, expectedEnd: 112},
+		{rangeStart: 10, rangeEnd: 97, chunkUnit: 32, expectedStart: 0, expectedEnd: 224},
+		{rangeStart: 97, rangeEnd: 98, chunkUnit: 32, expectedStart: 112, expectedEnd: 224},
+		{rangeStart: 0, rangeEnd: 32*backend.K*2 + 2, chunkUnit: 32, expectedStart: 0, expectedEnd: 336},
+	}
 
 	for _, param := range testParams {
 		p := param
-		testName := fmt.Sprintf("TestEMatrixBounds-%d-%d", p[0], p[1])
+		testName := fmt.Sprintf("TestEMatrixBounds-%d-%d", p.rangeStart, p.rangeEnd)
 		t.Run(testName, func(t *testing.T) {
-			start, end := backend.GetRangeMatrix(p[0], p[1], p[2])
-			if start != p[3] || end != p[4] {
-				t.Errorf("start is %d instead of %d and end is %d instead of %d", start, p[3], end, p[4])
+			start, end := backend.GetRangeMatrix(p.rangeStart, p.rangeEnd, p.chunkUnit)
+			if start != p.expectedStart || end != p.expectedEnd {
+				t.Errorf("start is %d instead of %d and end is %d instead of %d",
+					start, p.expectedStart, end, p.expectedEnd)
 			}
 
 		})
@@ -730,19 +747,26 @@ func TestReconstructM(t *testing.T) {
 
 	buf := make([]byte, 1024*1024)
 	for i := 0; i < len(buf); i++ {
-		buf[i] = byte(65 + i%26)
+		buf[i] = byte('A' + i%26)
 	}
 
 	// All our sub tests case. Each {X,Y} represents respecitvely the chunking unit (size of each subpart)
 	// and the fragment number we want to have to reconstruct
-	testParams := [][]int{{4096, 0}, {4096, backend.K}, {DefaultChunkSize, 1}}
+	testParams := []struct {
+		chunkUnit  int
+		fragNumber int
+	}{
+		{chunkUnit: 4096, fragNumber: 0},
+		{chunkUnit: 4096, fragNumber: backend.K},
+		{chunkUnit: DefaultChunkSize, fragNumber: 1},
+	}
 
 	for _, param := range testParams {
 		p := param
-		testName := fmt.Sprintf("TestReconstruct-%d-%d", p[0], p[1])
+		testName := fmt.Sprintf("TestReconstruct-%d-%d", p.chunkUnit, p.fragNumber)
 		t.Run(testName, func(t *testing.T) {
 			// Do the matrix encoding
-			result, err := backend.EncodeMatrix(buf, p[0])
+			result, err := backend.EncodeMatrix(buf, p.chunkUnit)
 
 			defer result.Free()
 
@@ -752,20 +776,20 @@ func TestReconstructM(t *testing.T) {
 
 			var vect [][]byte
 			for i := 0; i < backend.K+backend.M; i++ {
-				if i != p[1] {
+				if i != p.fragNumber {
 					vect = append(vect, result.Data[i])
 				}
 			}
 
-			fragment, err := backend.ReconstructMatrix(vect, p[1], p[0])
+			fragment, err := backend.ReconstructMatrix(vect, p.fragNumber, p.chunkUnit)
 			if err != nil {
-				t.Errorf("cannot reconstruct fragment %d cause=%v", p[1], err)
+				t.Errorf("cannot reconstruct fragment %d cause=%v", p.fragNumber, err)
 			}
 			if fragment == nil {
 				t.Errorf("unexpected error / fragment rebuilt is nil")
 			}
 
-			res := bytes.Compare(fragment, result.Data[p[1]])
+			res := bytes.Compare(fragment, result.Data[p.fragNumber])
 			if res != 0 {
 				t.Errorf("Error, fragment rebuilt is different from the original one")
 			}
