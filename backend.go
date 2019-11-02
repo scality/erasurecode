@@ -302,7 +302,8 @@ type Params struct {
 // Backend is a wrapper of a backend descriptor of liberasurecode
 type Backend struct {
 	Params
-	libecDesc C.int
+	libecDesc  C.int
+	headerSize int
 }
 
 // BackendIsAvailable check a backend availability
@@ -316,7 +317,7 @@ func BackendIsAvailable(name string) bool {
 
 // InitBackend returns a backend descriptor according params provided
 func InitBackend(params Params) (Backend, error) {
-	backend := Backend{params, 0}
+	backend := Backend{params, 0, int(C.getHeaderSize())}
 	id, err := nameToID(backend.Name)
 	if err != nil {
 		return backend, err
@@ -332,7 +333,6 @@ func InitBackend(params Params) (Backend, error) {
 		return backend, fmt.Errorf("instance_create() returned %v", errToName(-desc))
 	}
 	backend.libecDesc = desc
-
 	// Workaround on init bug of Jerasure
 	// Apparently, jerasure will crash if the
 	// first encode is done concurrently with other encode.
@@ -392,12 +392,6 @@ func (backend *Backend) Encode(data []byte) (*EncodeData, error) {
 		C.liberasurecode_encode_cleanup(
 			backend.libecDesc, dataFrags, parityFrags)
 	}}, nil
-}
-
-// GetHeaderSize returns the size of the header written by liberasurecode before each chunks
-func (backend *Backend) GetHeaderSize() int {
-	r := int(C.getHeaderSize())
-	return r
 }
 
 // EncodeMatrix encodes data in small subpart of chunkSize bytes
@@ -470,7 +464,7 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 		C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frag[0]))
 	}
 	fragLen := len(frags[0])
-	lenBlock := piecesize + backend.GetHeaderSize()
+	lenBlock := piecesize + backend.headerSize
 	numBlock := fragLen / lenBlock
 	if numBlock*lenBlock != fragLen {
 		numBlock++
@@ -530,14 +524,14 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 // decodeMatrixSlow is a fallback when something went wrong with decodeMatrix (especially when data part is missing)
 func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*DecodeData, error) {
 	fragLen := len(frags[0])
-	blockSize := piecesize + backend.GetHeaderSize()
+	blockSize := piecesize + backend.headerSize
 	blockNr := fragLen / blockSize
 	if blockNr*blockSize != fragLen {
 		blockNr++
 	}
 	data := make([]byte, 0)
 
-	cellSize := piecesize + backend.GetHeaderSize()
+	cellSize := piecesize + backend.headerSize
 
 	for i := 0; i < blockNr; i++ {
 		var vect [][]byte
@@ -565,8 +559,8 @@ func (backend *Backend) GetRangeMatrix(start, end, chunksize int) (int, int) {
 	rEnd := end / groupSize
 
 	// convert block number to offset
-	rStart = rStart * (chunksize + backend.GetHeaderSize())
-	rEnd = (rEnd + 1) * (chunksize + backend.GetHeaderSize())
+	rStart = rStart * (chunksize + backend.headerSize)
+	rEnd = (rEnd + 1) * (chunksize + backend.headerSize)
 
 	return rStart, rEnd
 }
@@ -631,14 +625,14 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksi
 	}
 
 	fragLen := len(frags[0])
-	blockSize := chunksize + backend.GetHeaderSize()
+	blockSize := chunksize + backend.headerSize
 	blockNr := fragLen / blockSize
 	if blockNr*blockSize != fragLen {
 		blockNr++
 	}
 	data := make([]byte, 0)
 
-	cellSize := chunksize + backend.GetHeaderSize()
+	cellSize := chunksize + backend.headerSize
 
 	// TODO use goroutines here to leverage multicore computation
 	for i := 0; i < blockNr; i++ {
