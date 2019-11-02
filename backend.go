@@ -9,7 +9,6 @@ package erasurecode
 // shims to make working with frag arrays easier
 char ** makeStrArray(int n) { return calloc(n, sizeof (char *)); }
 void freeStrArray(char ** arr) { free(arr); }
-void * getStrArrayItem(char ** arr, int idx) { return arr[idx]; }
 void setStrArrayItem(char ** arr, int idx, unsigned char * val) { arr[idx] = (char *) val; }
 // shims because the fragment headers use misaligned fields
 uint64_t getOrigDataSize(struct fragment_header_s *header) { return header->meta.orig_data_size; }
@@ -232,6 +231,12 @@ import (
 	"unsafe"
 )
 
+// Get the Nth value of a C string array
+func cGetArrayItem(p **C.char, nth int) unsafe.Pointer {
+	v1 := unsafe.Pointer(uintptr(unsafe.Pointer(p)) + uintptr(nth)*unsafe.Sizeof(p))
+	return unsafe.Pointer(*((**C.char)(v1)))
+}
+
 // Version describes the module version
 type Version struct {
 	Major    uint
@@ -383,10 +388,12 @@ func (backend *Backend) Encode(data []byte) (*EncodeData, error) {
 	for i := 0; i < backend.K; i++ {
 		// Convert the data block into a slice without copying the data.
 		// Note: the 1 << 30 is not really used, the slice is set to a length & a capacity.
-		result[i] = (*[1 << 30]byte)(C.getStrArrayItem(dataFrags, C.int(i)))[:int(fragLength):int(fragLength)]
+		str := cGetArrayItem(dataFrags, i)
+		result[i] = (*[1 << 30]byte)((str))[:int(fragLength):int(fragLength)]
 	}
 	for i := 0; i < backend.M; i++ {
-		result[i+backend.K] = (*[1 << 30]byte)(C.getStrArrayItem(parityFrags, C.int(i)))[:int(fragLength):int(fragLength)]
+		str := cGetArrayItem(parityFrags, i)
+		result[i+backend.K] = (*[1 << 30]byte)(str)[:int(fragLength):int(fragLength)]
 	}
 	return &EncodeData{result, func() {
 		C.liberasurecode_encode_cleanup(
@@ -427,11 +434,13 @@ func (backend *Backend) EncodeMatrix(data []byte, chunkSize int) (*EncodeData, e
 	result := make([][]byte, backend.K+backend.M)
 	fragLen := ctx.frags_len
 	for i := 0; i < backend.K; i++ {
-		result[i] = (*[1 << 30]byte)(unsafe.Pointer(C.getStrArrayItem(ctx.datas, C.int(i))))[:int(C.int(fragLen)):int(C.int(fragLen))]
+		str := cGetArrayItem(ctx.datas, i)
+		result[i] = (*[1 << 30]byte)(str)[:int(C.int(fragLen)):int(C.int(fragLen))]
 
 	}
 	for i := 0; i < backend.M; i++ {
-		result[i+backend.K] = (*[1 << 30]byte)(unsafe.Pointer(C.getStrArrayItem(ctx.codings, C.int(i))))[:int(C.int(fragLen)):int(C.int(fragLen))]
+		str := cGetArrayItem(ctx.codings, i)
+		result[i+backend.K] = (*[1 << 30]byte)(str)[:int(C.int(fragLen)):int(C.int(fragLen))]
 	}
 
 	return &EncodeData{result, func() {
