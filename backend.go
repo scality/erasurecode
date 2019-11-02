@@ -348,7 +348,7 @@ func InitBackend(params Params) (Backend, error) {
 		return Backend{}, err
 	}
 
-	defer res.Free()
+	res.Free()
 
 	return backend, nil
 }
@@ -579,7 +579,7 @@ func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 	}
 
 	cFrags := C.makeStrArray(C.int(len(frags)))
-	defer C.freeStrArray(cFrags)
+
 	for index, frag := range frags {
 		C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frag[0]))
 	}
@@ -588,9 +588,12 @@ func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 		backend.libecDesc, cFrags, C.int(len(frags)),
 		C.uint64_t(len(frags[0])), C.int(1),
 		&data, &dataLength); rc != 0 {
+		C.freeStrArray(cFrags)
 		return nil, fmt.Errorf("decode() returned %v", errToName(-rc))
 	}
+
 	runtime.KeepAlive(frags) // prevent frags from being GC-ed during decode
+	C.freeStrArray(cFrags)
 
 	return &DecodeData{(*[1 << 30]byte)(unsafe.Pointer(data))[:int(dataLength):int(dataLength)],
 			func() {
@@ -609,7 +612,7 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 	pData := (*C.char)(unsafe.Pointer(&data[0]))
 
 	cFrags := C.makeStrArray(C.int(len(frags)))
-	defer C.freeStrArray(cFrags)
+
 	for index, frag := range frags {
 		C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frag[0]))
 	}
@@ -617,8 +620,10 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 	if rc := C.liberasurecode_reconstruct_fragment(
 		backend.libecDesc, cFrags, C.int(len(frags)),
 		C.uint64_t(len(frags[0])), C.int(fragIndex), pData); rc != 0 {
+		C.freeStrArray(cFrags)
 		return nil, fmt.Errorf("reconstruct_fragment() returned %v", errToName(-rc))
 	}
+	C.freeStrArray(cFrags)
 	runtime.KeepAlive(frags) // prevent frags from being GC-ed during reconstruct
 	return data, nil
 }
