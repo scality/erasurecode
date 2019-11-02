@@ -10,7 +10,6 @@ package erasurecode
 char ** makeStrArray(int n) { return calloc(n, sizeof (char *)); }
 void freeStrArray(char ** arr) { free(arr); }
 void * getStrArrayItem(char ** arr, int idx) { return arr[idx]; }
-char * getStrOffset(char *ptr, int offset) { return ptr + offset; }
 void setStrArrayItem(char ** arr, int idx, unsigned char * val) { arr[idx] = (char *) val; }
 // shims because the fragment headers use misaligned fields
 uint64_t getOrigDataSize(struct fragment_header_s *header) { return header->meta.orig_data_size; }
@@ -498,8 +497,9 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 			// try to decode fastly (if we have all data fragments), providing the good offset of the
 			// linearized buffer, according the block number we are decoding
 			var outlen C.uint64_t
+			var ptr uintptr = uintptr(unsafe.Pointer(data)) + uintptr(blockNr*piecesize*backend.K)
 			p := C.decode_fast(C.int(backend.K), cFrags, C.int(len(frags)),
-				C.getStrOffset(data, C.int(blockNr*piecesize*backend.K)),
+				(*C.char)(unsafe.Pointer(ptr)),
 				C.ulong(piecesize*backend.K), &outlen)
 
 			if p == nil {
