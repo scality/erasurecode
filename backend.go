@@ -467,11 +467,6 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 		return nil, errors.New("decoding requires at least one fragment")
 	}
 
-	cFrags := C.makeStrArray(C.int(len(frags)))
-	defer C.freeStrArray(cFrags)
-	for index, frag := range frags {
-		C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frag[0]))
-	}
 	fragLen := len(frags[0])
 	lenBlock := piecesize + backend.headerSize
 	numBlock := fragLen / lenBlock
@@ -492,7 +487,6 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 		// in concurrency without need to lock it access
 		go func(blockNr int) {
 			cFrags := C.makeStrArray(C.int(len(frags)))
-			defer C.freeStrArray(cFrags)
 			// prepare the C array of pointer, respecting the offset in each fragments
 			for index, frags := range frags {
 				C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frags[blockNr*lenBlock]))
@@ -510,10 +504,12 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 			} else {
 				atomic.AddUint64(&totLen, uint64(outlen))
 			}
+			C.freeStrArray(cFrags)
 			wg.Done()
 		}(currBlock)
 	}
 	wg.Wait()
+
 	// if we got some issues, fallback on "slow" decoding
 	if errorNb != 0 {
 		C.free(unsafe.Pointer(data))
