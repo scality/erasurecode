@@ -507,6 +507,7 @@ func TestGC(t *testing.T) {
 			wg.Wait()
 		})
 	}
+	backend.Close()
 }
 
 func TestAvailableBackends(t *testing.T) {
@@ -533,6 +534,7 @@ func BenchmarkEncode(b *testing.B) {
 		}
 		encoded.Free()
 	}
+	backend.Close()
 }
 
 const DefaultChunkSize = 32768
@@ -562,6 +564,7 @@ func BenchmarkDecodeM(b *testing.B) {
 			b.Fatal("decoded is nil")
 		}
 	}
+	backend.Close()
 }
 
 func BenchmarkDecodeMSlow(b *testing.B) {
@@ -574,15 +577,15 @@ func BenchmarkDecodeMSlow(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		defer encoded.Free()
 
 		decoded, err := backend.decodeMatrixSlow(encoded.Data, DefaultChunkSize)
 		if err != nil {
 			b.Fatal(err)
 		}
-
-		defer decoded.Free()
+		encoded.Free()
+		decoded.Free()
 	}
+	backend.Close()
 }
 
 func BenchmarkEncodeM(b *testing.B) {
@@ -599,6 +602,7 @@ func BenchmarkEncodeM(b *testing.B) {
 		}
 		encoded.Free()
 	}
+	backend.Close()
 }
 
 func BenchmarkDecode(b *testing.B) {
@@ -617,6 +621,7 @@ func BenchmarkDecode(b *testing.B) {
 		}
 		decoded.Free()
 	}
+	backend.Close()
 }
 
 func TestEncodeM(t *testing.T) {
@@ -688,6 +693,7 @@ func TestEncodeM(t *testing.T) {
 			result.Free()
 		})
 	}
+	backend.Close()
 }
 
 // checkData reads a buffer and check that we have a round robin sequence of [A-Z] characters
@@ -795,4 +801,5 @@ func TestReconstructM(t *testing.T) {
 			}
 		})
 	}
+	backend.Close()
 }
