@@ -9,7 +9,6 @@ package erasurecode
 // shims to make working with frag arrays easier
 char ** makeStrArray(int n) { return calloc(n, sizeof (char *)); }
 void freeStrArray(char ** arr) { free(arr); }
-void setStrArrayItem(char ** arr, int idx, unsigned char * val) { arr[idx] = (char *) val; }
 // shims because the fragment headers use misaligned fields
 uint64_t getOrigDataSize(struct fragment_header_s *header) { return header->meta.orig_data_size; }
 uint32_t getBackendVersion(struct fragment_header_s *header) { return header->meta.backend_version; }
@@ -235,6 +234,11 @@ import (
 func cGetArrayItem(p **C.char, nth int) unsafe.Pointer {
 	v1 := unsafe.Pointer(uintptr(unsafe.Pointer(p)) + uintptr(nth)*unsafe.Sizeof(p))
 	return unsafe.Pointer(*((**C.char)(v1)))
+}
+
+func cSetArrayItem(p **C.char, nth int, ptr *C.char) {
+	v1 := unsafe.Pointer(uintptr(unsafe.Pointer(p)) + uintptr(nth)*unsafe.Sizeof(p))
+	*((**C.char)(v1)) = (ptr)
 }
 
 // Version describes the module version
@@ -489,7 +493,8 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 			cFrags := C.makeStrArray(C.int(len(frags)))
 			// prepare the C array of pointer, respecting the offset in each fragments
 			for index, frags := range frags {
-				C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frags[blockNr*lenBlock]))
+				ptr := unsafe.Pointer(&frags[blockNr*lenBlock])
+				cSetArrayItem(cFrags, index, (*C.char)(ptr))
 			}
 			// try to decode fastly (if we have all data fragments), providing the good offset of the
 			// linearized buffer, according the block number we are decoding
@@ -581,7 +586,8 @@ func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 	cFrags := C.makeStrArray(C.int(len(frags)))
 
 	for index, frag := range frags {
-		C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frag[0]))
+		ptr := unsafe.Pointer(&frag[0])
+		cSetArrayItem(cFrags, index, (*C.char)(ptr))
 	}
 
 	if rc := C.liberasurecode_decode(
@@ -614,7 +620,8 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 	cFrags := C.makeStrArray(C.int(len(frags)))
 
 	for index, frag := range frags {
-		C.setStrArrayItem(cFrags, C.int(index), (*C.uchar)(&frag[0]))
+		ptr := unsafe.Pointer(&frag[0])
+		cSetArrayItem(cFrags, index, (*C.char)(ptr))
 	}
 
 	if rc := C.liberasurecode_reconstruct_fragment(
