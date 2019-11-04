@@ -66,13 +66,13 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
                     frags[index] = in[i];
                 }
         }
-	// if we don't have enough data fragment, we leave this function and will probably
-	// fallback on a true deocodin function
+        // if we don't have enough data fragment, we leave this function and will probably
+        // fallback on a true deocodin function
         if (curr_idx != k) {
             return NULL;
         }
 
-	// compute how number of bytes will be linearized
+        // compute how number of bytes will be linearized
         int tocopy = orig_data_size;
         int string_off = 0;
         *outlen = orig_data_size;
@@ -81,7 +81,7 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
             tocopy = destlen;
         }
 
-	// copy in an ordered way all bytes of fragments in the buffer
+        // copy in an ordered way all bytes of fragments in the buffer
         for (i = 0; i < k && tocopy > 0; i++) {
             char *f = get_data_ptr_from_fragment(frags[i]);
             int fsize = get_fragment_payload_size(frags[i]);
@@ -95,15 +95,15 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
 
 
 struct encode_chunk_context {
-  ec_backend_t instance; // backend instance
-  char **datas;                  // the K datas
-  char **codings;        // the M codings
-  unsigned int number_of_subgroup; // number of subchunk in each K part
-  unsigned int chunk_size;       // datasize of each subchunk
-  unsigned int frags_len; // allocating size of each K+M objects
-  int blocksize;          // k-bounds of data
-  int k;
-  int m;
+    ec_backend_t instance; // backend instance
+    char **datas;          // the K datas
+    char **codings;        // the M codings
+    unsigned int number_of_subgroup; // number of subchunk in each K part
+    unsigned int chunk_size;         // datasize of each subchunk
+    unsigned int frags_len; // allocating size of each K+M objects
+    int blocksize;          // k-bounds of data
+    int k;
+    int m;
 };
 
 // instead of encoding K blocks of data, we divide and subencode blocks of
@@ -120,36 +120,36 @@ void encode_chunk_prepare(int desc,
                           int piecesize,
                           struct encode_chunk_context *ctx)
 {
-  ctx->instance = liberasurecode_backend_instance_get_by_desc(desc);
-  int i;
-  const int k = ctx->instance->args.uargs.k;
-  const int m = ctx->instance->args.uargs.m;
+    ctx->instance = liberasurecode_backend_instance_get_by_desc(desc);
+    int i;
+    const int k = ctx->instance->args.uargs.k;
+    const int m = ctx->instance->args.uargs.m;
 
-  // here we compute the number of (k) subgroup of 'piecesize' bytes we can create
-  int block_size = piecesize * k;
-  ctx->number_of_subgroup = datalen / block_size;
-  if(ctx->number_of_subgroup * block_size != datalen) {
-        ctx->number_of_subgroup++;
+    // here we compute the number of (k) subgroup of 'piecesize' bytes we can create
+    int block_size = piecesize * k;
+    ctx->number_of_subgroup = datalen / block_size;
+    if(ctx->number_of_subgroup * block_size != datalen) {
+          ctx->number_of_subgroup++;
+    }
+
+    ctx->chunk_size = piecesize;
+
+    ctx->k = k;
+    ctx->m = m;
+
+    ctx->datas     = calloc(ctx->k, sizeof(char*));
+    ctx->codings   = calloc(ctx->m, sizeof(char*));
+    ctx->frags_len = (sizeof(fragment_header_t) + piecesize) * ctx->number_of_subgroup;
+
+    for (i = 0; i < ctx->k; ++i) {
+        ctx->datas[i] = get_aligned_buffer16(ctx->frags_len);
+    }
+
+    for (i = 0; i < ctx->m; ++i) {
+        ctx->codings[i] = get_aligned_buffer16(ctx->frags_len);
+    }
+
   }
-
-  ctx->chunk_size = piecesize;
-
-  ctx->k = k;
-  ctx->m = m;
-
-  ctx->datas     = calloc(ctx->k, sizeof(char*));
-  ctx->codings   = calloc(ctx->m, sizeof(char*));
-  ctx->frags_len = (sizeof(fragment_header_t) + piecesize) * ctx->number_of_subgroup;
-
-  for (i = 0; i < ctx->k; ++i) {
-    ctx->datas[i] = get_aligned_buffer16(ctx->frags_len);
-  }
-
-  for (i = 0; i < ctx->m; ++i) {
-    ctx->codings[i] = get_aligned_buffer16(ctx->frags_len);
-  }
-
-}
 
 // encode_chunk will encode a subset of the fragments data.
 // It has to be considered that all the datas will not be divided in K blocks, but instead,
@@ -164,62 +164,61 @@ void encode_chunk_prepare(int desc,
 // having a small subset of data) especially when a whole fragment will be missing
 int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context *ctx, int nth)
 {
-  ec_backend_t ec = ctx->instance;
-  char *k_ref[ctx->k];
-  char *m_ref[ctx->m];
+    ec_backend_t ec = ctx->instance;
+    char *k_ref[ctx->k];
+    char *m_ref[ctx->m];
 
-  int one_cell_size = sizeof(fragment_header_t) + ctx->chunk_size;
-  int i, ret;
-  char const *const dataend = data + datalen;
-  char *dataoffset = data + (ctx->k * nth) * ctx->chunk_size;
-  if (nth >= ctx->number_of_subgroup) {
-    return -1;
-  }
+    int one_cell_size = sizeof(fragment_header_t) + ctx->chunk_size;
+    int i, ret;
+    char const *const dataend = data + datalen;
+    char *dataoffset = data + (ctx->k * nth) * ctx->chunk_size;
+    if (nth >= ctx->number_of_subgroup) {
+        return -1;
+    }
 
-  // Do the mapping as described above
-  int tot_len_sum = 0;
-  for (i = 0; i < ctx->k; i++) {
-    char *ptr = &ctx->datas[i][nth * one_cell_size];
-    fragment_header_t *hdr = (fragment_header_t*)ptr;
-    hdr->magic = LIBERASURECODE_FRAG_HEADER_MAGIC;
+    // Do the mapping as described above
+    int tot_len_sum = 0;
+    for (i = 0; i < ctx->k; i++) {
+        char *ptr = &ctx->datas[i][nth * one_cell_size];
+        fragment_header_t *hdr = (fragment_header_t*)ptr;
+        hdr->magic = LIBERASURECODE_FRAG_HEADER_MAGIC;
         ptr = (char*) (hdr + 1);
         if(dataoffset < dataend) {
-          int len_to_copy = ctx->chunk_size;
-          if (len_to_copy > dataend - dataoffset) {
-                  len_to_copy = dataend - dataoffset;
-		  }
-		  tot_len_sum += len_to_copy;
-          memcpy(ptr, dataoffset, len_to_copy);
+            int len_to_copy = ctx->chunk_size;
+            if (len_to_copy > dataend - dataoffset) {
+                len_to_copy = dataend - dataoffset;
+            }
+            tot_len_sum += len_to_copy;
+            memcpy(ptr, dataoffset, len_to_copy);
         }
         dataoffset += ctx->chunk_size;
-    k_ref[i] = ptr;
-  }
+         k_ref[i] = ptr;
+    }
 
-  for (i = 0; i < ctx->m; i++) {
-    char *ptr = &ctx->codings[i][nth * one_cell_size];
-    fragment_header_t *hdr = (fragment_header_t*)ptr;
-    hdr->magic = LIBERASURECODE_FRAG_HEADER_MAGIC;
-    ptr = (char*) (hdr + 1);
-    m_ref[i] = ptr;
-  }
+    for (i = 0; i < ctx->m; i++) {
+        char *ptr = &ctx->codings[i][nth * one_cell_size];
+        fragment_header_t *hdr = (fragment_header_t*)ptr;
+        hdr->magic = LIBERASURECODE_FRAG_HEADER_MAGIC;
+        ptr = (char*) (hdr + 1);
+        m_ref[i] = ptr;
+    }
 
-  // do the true encoding according the backend used (isa-l, cauchy ....)
-  ret = ec->common.ops->encode(ec->desc.backend_desc, k_ref, m_ref, ctx->chunk_size);
-  if (ret < 0) {
-      fprintf(stderr, "error encode ret = %d\n", ret);
-      return -1;
-  }
-  // fill the headers with true len, fragment len ....
-  ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, tot_len_sum, k_ref, m_ref);
-  if (ret < 0) {
-      fprintf(stderr, "error encode ret = %d\n", ret);
-      return -1;
-  }
-  return 0;
+    // do the true encoding according the backend used (isa-l, cauchy ....)
+    ret = ec->common.ops->encode(ec->desc.backend_desc, k_ref, m_ref, ctx->chunk_size);
+    if (ret < 0) {
+        fprintf(stderr, "error encode ret = %d\n", ret);
+        return -1;
+    }
+    // fill the headers with true len, fragment len ....
+    ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, tot_len_sum, k_ref, m_ref);
+    if (ret < 0) {
+        fprintf(stderr, "error encode ret = %d\n", ret);
+        return -1;
+    }
+    return 0;
 }
 */
 import "C"
-
 import (
 	"bytes"
 	"errors"
