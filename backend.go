@@ -559,9 +559,10 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 
 // GetRangeMatrix returns the bounds of each data fragments to get to satisfy
 // {start, end} range
-func (backend *Backend) GetRangeMatrix(start, end, chunksize int) (int, int) {
+func (backend *Backend) GetRangeMatrix(start, end, chunksize, fragSize int) (int, int) {
 	blockSize := chunksize
 	groupSize := blockSize * backend.K
+	maxBound := fragSize / backend.K
 
 	// start's block number
 	rStart := start / groupSize
@@ -570,7 +571,12 @@ func (backend *Backend) GetRangeMatrix(start, end, chunksize int) (int, int) {
 	// convert block number to offset
 	rStart = rStart * (chunksize + backend.headerSize)
 	rEnd = (rEnd + 1) * (chunksize + backend.headerSize)
-
+	if rStart > maxBound {
+		rStart = maxBound
+	}
+	if rEnd > maxBound {
+		rEnd = maxBound
+	}
 	return rStart, rEnd
 }
 

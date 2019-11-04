@@ -538,6 +538,7 @@ func BenchmarkEncode(b *testing.B) {
 }
 
 const DefaultChunkSize = 32768
+const DefaultFragSize = 1048576
 
 func BenchmarkDecodeM(b *testing.B) {
 	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
@@ -711,7 +712,7 @@ func checkData(data []byte) bool {
 }
 
 func TestMatrixBounds(t *testing.T) {
-	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 3, M: 1, W: 8, HD: 5})
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 2, M: 1, W: 8, HD: 5})
 
 	if err != nil {
 		t.Fatalf("cannot init backend: (%v)", err)
@@ -724,17 +725,14 @@ func TestMatrixBounds(t *testing.T) {
 		expectedStart int
 		expectedEnd   int
 	}{
-		{rangeStart: 0, rangeEnd: 95, chunkUnit: 32, expectedStart: 0, expectedEnd: 112},
-		{rangeStart: 10, rangeEnd: 97, chunkUnit: 32, expectedStart: 0, expectedEnd: 224},
-		{rangeStart: 97, rangeEnd: 98, chunkUnit: 32, expectedStart: 112, expectedEnd: 224},
-		{rangeStart: 0, rangeEnd: 32*backend.K*2 + 2, chunkUnit: 32, expectedStart: 0, expectedEnd: 336},
+		{rangeStart: 1023999, rangeEnd: 1048575, chunkUnit: DefaultChunkSize, expectedStart: 492720, expectedEnd: 524288},
 	}
 
 	for _, param := range testParams {
 		p := param
 		testName := fmt.Sprintf("TestEMatrixBounds-%d-%d", p.rangeStart, p.rangeEnd)
 		t.Run(testName, func(t *testing.T) {
-			start, end := backend.GetRangeMatrix(p.rangeStart, p.rangeEnd, p.chunkUnit)
+			start, end := backend.GetRangeMatrix(p.rangeStart, p.rangeEnd, p.chunkUnit, DefaultFragSize)
 			if start != p.expectedStart || end != p.expectedEnd {
 				t.Errorf("start is %d instead of %d and end is %d instead of %d",
 					start, p.expectedStart, end, p.expectedEnd)
