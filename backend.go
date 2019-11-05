@@ -463,7 +463,6 @@ type DecodeData struct {
 
 // DecodeMatrix decode all the subchunk of frags, and linearize data
 func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData, error) {
-	var data *C.char
 	var wg sync.WaitGroup
 
 	if len(frags) == 0 {
@@ -477,8 +476,8 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 		numBlock++
 	}
 
-	// allocate the C final Buffer
-	data = (*C.char)(C.malloc(C.ulong(numBlock * piecesize * backend.K)))
+	// allocate output buffer
+	data := make([]byte, numBlock*piecesize*backend.K)
 
 	errorNb := uint32(0)
 	totLen := uint64(0)
@@ -498,9 +497,9 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 			// try to decode fastly (if we have all data fragments), providing the good offset of the
 			// linearized buffer, according the block number we are decoding
 			var outlen C.uint64_t
-			var ptr uintptr = uintptr(unsafe.Pointer(data)) + uintptr(blockNr*piecesize*backend.K)
+			pos := &data[blockNr*piecesize*backend.K]
 			p := C.decode_fast(C.int(backend.K), cFrags, C.int(len(frags)),
-				(*C.char)(unsafe.Pointer(ptr)),
+				(*C.char)(unsafe.Pointer(pos)),
 				C.uint64_t(piecesize*backend.K), &outlen)
 
 			if p == nil {
@@ -516,15 +515,14 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 
 	// if we got some issues, fallback on "slow" decoding
 	if errorNb != 0 {
-		C.free(unsafe.Pointer(data))
+		//C.free(unsafe.Pointer(data))
 		return backend.decodeMatrixSlow(frags, piecesize)
 	}
 
 	// return our linearized data. Closure expect to free the C allocated data once
 	// the DecodeData.Data will not be used anymore
-	return &DecodeData{(*[1 << 30]byte)(unsafe.Pointer(data))[:int(totLen):int(totLen)],
+	return &DecodeData{data[:int(totLen):int(totLen)],
 			func() {
-				C.liberasurecode_decode_cleanup(backend.libecDesc, data)
 			}},
 		nil
 
