@@ -501,7 +501,7 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 			var ptr uintptr = uintptr(unsafe.Pointer(data)) + uintptr(blockNr*piecesize*backend.K)
 			p := C.decode_fast(C.int(backend.K), cFrags, C.int(len(frags)),
 				(*C.char)(unsafe.Pointer(ptr)),
-				C.ulong(piecesize*backend.K), &outlen)
+				C.uint64_t(piecesize*backend.K), &outlen)
 
 			if p == nil {
 				atomic.AddUint32(&errorNb, 1)
@@ -557,27 +557,44 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 	return &DecodeData{data, func() {}}, nil
 }
 
+// RangeMatrix describes informations needed to decode a range of encoded frags
+type RangeMatrix struct {
+	FragRangeStart    int // Start offset in each K+M fragments
+	FragRangeEnd      int // End offset in each K+M fragments
+	DecodedRangeStart int // Start offset in decoded data
+	DecodedRangeEnd   int // end offset in decoded data
+}
+
 // GetRangeMatrix returns the bounds of each data fragments to get to satisfy
 // {start, end} range
-func (backend *Backend) GetRangeMatrix(start, end, chunksize, fragSize int) (int, int) {
+func (backend *Backend) GetRangeMatrix(start, end, chunksize, fragSize int) *RangeMatrix {
 	blockSize := chunksize
 	groupSize := blockSize * backend.K
-	maxBound := fragSize / backend.K
+
+	// check that range can be satisfied
+	nrChunkByFrag := fragSize / (backend.headerSize + chunksize)
+	trueFragLen := nrChunkByFrag * chunksize
+	linearizedDataLen := trueFragLen * backend.K
+
+	if start > linearizedDataLen || end > linearizedDataLen || start > end {
+		return nil
+	}
 
 	// start's block number
 	rStart := start / groupSize
 	rEnd := end / groupSize
 
 	// convert block number to offset
-	rStart = rStart * (chunksize + backend.headerSize)
-	rEnd = (rEnd + 1) * (chunksize + backend.headerSize)
-	if rStart > maxBound {
-		rStart = maxBound
+	fragStart := rStart * (chunksize + backend.headerSize)
+	fragEnd := (rEnd + 1) * (chunksize + backend.headerSize)
+	linearizedStart := rStart * backend.K * chunksize
+
+	return &RangeMatrix{
+		FragRangeStart:    fragStart,
+		FragRangeEnd:      fragEnd,
+		DecodedRangeStart: start - linearizedStart,
+		DecodedRangeEnd:   end - linearizedStart,
 	}
-	if rEnd > maxBound {
-		rEnd = maxBound
-	}
-	return rStart, rEnd
 }
 
 // Decode is the general purpose decoding function (without sub-chunking)

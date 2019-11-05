@@ -725,17 +725,17 @@ func TestMatrixBounds(t *testing.T) {
 		expectedStart int
 		expectedEnd   int
 	}{
-		{rangeStart: 1023999, rangeEnd: 1048575, chunkUnit: DefaultChunkSize, expectedStart: 492720, expectedEnd: 524288},
+		{rangeStart: 1023999, rangeEnd: 1048575, chunkUnit: DefaultChunkSize, expectedStart: 492720, expectedEnd: 525568},
 	}
 
 	for _, param := range testParams {
 		p := param
 		testName := fmt.Sprintf("TestEMatrixBounds-%d-%d", p.rangeStart, p.rangeEnd)
 		t.Run(testName, func(t *testing.T) {
-			start, end := backend.GetRangeMatrix(p.rangeStart, p.rangeEnd, p.chunkUnit, DefaultFragSize)
-			if start != p.expectedStart || end != p.expectedEnd {
-				t.Errorf("start is %d instead of %d and end is %d instead of %d",
-					start, p.expectedStart, end, p.expectedEnd)
+			rmatrix := backend.GetRangeMatrix(p.rangeStart, p.rangeEnd, p.chunkUnit, DefaultFragSize)
+
+			if rmatrix.FragRangeStart != p.expectedStart || rmatrix.FragRangeEnd != p.expectedEnd {
+				t.Errorf("error : %+v but got %+v", p, rmatrix)
 			}
 
 		})
