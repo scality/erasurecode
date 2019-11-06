@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 var validParams = []Params{
@@ -792,6 +794,7 @@ func TestEncodeM(t *testing.T) {
 			// all data fragments. After, we check that our linearized buffer
 			// contains expected data
 			ddata, err := backend.DecodeMatrix(result.Data, p.chunkUnit)
+			assert.NoError(t, err)
 			if ok := checkData(ddata.Data); ok == false {
 				t.Errorf("bad matrix decoding")
 			}

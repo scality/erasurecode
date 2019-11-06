@@ -1,0 +1,20 @@
+linters:
+  disable-all: true
+  enable:
+    - bodyclose
+    - deadcode
+    - goconst
+    - golint
+    - gosec
+    - prealloc
+    - staticcheck
+    - unparam
+    - unused
+# To be activated
+#    - gosimple
+#    - govet
+#    - stylecheck
+#    - unconvert
+#    - errcheck
+  enable-all: false
+  fast: false
