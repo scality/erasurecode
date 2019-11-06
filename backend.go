@@ -628,13 +628,11 @@ func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 		nil
 }
 
-// Reconstruct rebuild a missing fragment
-func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, error) {
+func (backend *Backend) reconstruct(frags [][]byte, fragIndex int, data[]byte) error {
 	if len(frags) == 0 {
-		return nil, errors.New("reconstruction requires at least one fragment")
+		return  errors.New("reconstruction requires at least one fragment")
 	}
-	fragLength := len(frags[0])
-	data := make([]byte, fragLength)
+
 	pData := (*C.char)(unsafe.Pointer(&data[0]))
 
 	cFrags := C.makeStrArray(C.int(len(frags)))
@@ -648,10 +646,24 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 		backend.libecDesc, cFrags, C.int(len(frags)),
 		C.uint64_t(len(frags[0])), C.int(fragIndex), pData); rc != 0 {
 		C.freeStrArray(cFrags)
-		return nil, fmt.Errorf("reconstruct_fragment() returned %v", errToName(-rc))
+		return fmt.Errorf("reconstruct_fragment() returned %v", errToName(-rc))
 	}
 	C.freeStrArray(cFrags)
 	runtime.KeepAlive(frags) // prevent frags from being GC-ed during reconstruct
+	return nil
+}
+
+// Reconstruct rebuild a missing fragment
+func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, error) {
+	if len(frags) == 0 {
+		return nil, errors.New("reconstruction requires at least one fragment")
+	}
+	fragLength := len(frags[0])
+	data := make([]byte, fragLength)
+
+	if err := backend.reconstruct(frags, fragIndex, data) ; err != nil {
+		return nil, err
+	}
 	return data, nil
 }
 
@@ -667,21 +679,20 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksi
 	if blockNr*blockSize != fragLen {
 		blockNr++
 	}
-	data := make([]byte, 0)
+	data := make([]byte, fragLen)
 
 	cellSize := chunksize + backend.headerSize
 
 	// TODO use goroutines here to leverage multicore computation
 	for i := 0; i < blockNr; i++ {
-		var vect [][]byte
+		vect := make([][]byte, len(frags))
 		for j := 0; j < len(frags); j++ {
-			vect = append(vect, frags[j][i*cellSize:(i+1)*cellSize])
+			vect[j] = frags[j][i*cellSize:(i+1)*cellSize]
+			//vect = append(vect, frags[j][i*cellSize:(i+1)*cellSize])
 		}
-		subdata, err := backend.Reconstruct(vect, fragIndex)
-		if err != nil {
+		if err := backend.reconstruct(vect, fragIndex, data[i * blockSize:]) ; err != nil {
 			return nil, fmt.Errorf("error subdecoding %d cause =%v", i, err)
 		}
-		data = append(data, subdata...)
 	}
 	return data, nil
 }

@@ -568,6 +568,27 @@ func BenchmarkDecodeM(b *testing.B) {
 	backend.Close()
 }
 
+func BenchmarkReconstructM(b *testing.B) {
+	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
+
+	buf := bytes.Repeat([]byte("A"), 1024*1024)
+	encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer encoded.Free()
+	flags := encoded.Data[1:]
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := backend.ReconstructMatrix(flags, 0, DefaultChunkSize)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	backend.Close()
+}
+
 func BenchmarkDecodeMSlow(b *testing.B) {
 	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
 	buf := bytes.Repeat([]byte("A"), 1024*1024)
