@@ -536,14 +536,14 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 	if blockNr*blockSize != fragLen {
 		blockNr++
 	}
-	data := make([]byte, 0)
+	data := make([]byte, 0, blockNr*piecesize*backend.K)
 
 	cellSize := piecesize + backend.headerSize
 
 	for i := 0; i < blockNr; i++ {
-		var vect [][]byte
+		vect := make([][]byte, len(frags))
 		for j := 0; j < len(frags); j++ {
-			vect = append(vect, frags[j][i*cellSize:(i+1)*cellSize])
+			vect[j] = frags[j][i*cellSize:(i+1)*cellSize]
 		}
 		subdata, err := backend.Decode(vect)
 		if err != nil {
@@ -688,7 +688,6 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksi
 		vect := make([][]byte, len(frags))
 		for j := 0; j < len(frags); j++ {
 			vect[j] = frags[j][i*cellSize:(i+1)*cellSize]
-			//vect = append(vect, frags[j][i*cellSize:(i+1)*cellSize])
 		}
 		if err := backend.reconstruct(vect, fragIndex, data[i * blockSize:]) ; err != nil {
 			return nil, fmt.Errorf("error subdecoding %d cause =%v", i, err)

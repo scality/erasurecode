@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -47,6 +48,7 @@ var testPatterns = [][]byte{
 	bytes.Repeat([]byte{0xde, 0xad, 0xbe, 0xef}, 256),
 	bytes.Repeat([]byte{0xaa}, 1024),
 	bytes.Repeat([]byte{0x55}, 1024),
+	bytes.Repeat([]byte{0x55}, 2234345),
 }
 
 func shuf(src [][]byte) [][]byte {
@@ -143,6 +145,7 @@ func TestEncodeDecode(t *testing.T) {
 			t.Errorf("Error creating backend %v: %q", params, err)
 			continue
 		}
+
 		for patternIndex, pattern := range testPatterns {
 			data, err := backend.Encode(pattern)
 			if err != nil {
@@ -544,16 +547,45 @@ func BenchmarkDecodeM(b *testing.B) {
 	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
 
 	buf := bytes.Repeat([]byte("A"), 1024*1024)
+	encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer encoded.Free()
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
-
+		decoded, err := backend.DecodeMatrix(encoded.Data, DefaultChunkSize)
 		if err != nil {
 			b.Fatal(err)
 		}
-		defer encoded.Free()
+		if decoded != nil {
+			if decoded.Free != nil {
+				decoded.Free()
+			}
+		} else {
+			b.Fatal("decoded is nil")
+		}
+	}
+	backend.Close()
+}
 
-		decoded, err := backend.DecodeMatrix(encoded.Data, DefaultChunkSize)
+func BenchmarkDecodeMissingM(b *testing.B) {
+	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
+
+	buf := bytes.Repeat([]byte("A"), 1024*1024)
+	encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer encoded.Free()
+
+	data := encoded.Data[1:]
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		decoded, err := backend.DecodeMatrix(data, DefaultChunkSize)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -697,7 +729,7 @@ func TestEncodeM(t *testing.T) {
 			vect = append(vect, result.Data[4])
 			vect = append(vect, result.Data[5])
 
-			ddata2, err := backend.decodeMatrixSlow(vect, p.chunkUnit)
+			ddata2, _ := backend.decodeMatrixSlow(vect, p.chunkUnit)
 			if ok := checkData(ddata2.Data); ok == false {
 				t.Errorf("bad matrix repairing")
 			}
@@ -821,4 +853,87 @@ func TestReconstructM(t *testing.T) {
 		})
 	}
 	backend.Close()
+}
+
+func TestEncodeDecodeMatrix(t *testing.T) {
+	for _, params := range validParams {
+		if strings.Contains(params.Name, "jerasure_rs_cauchy") {
+			t.Logf("Skipping %s, not working with matrix", params.Name)
+			continue
+		}
+		if !BackendIsAvailable(params.Name) {
+			continue
+		}
+		backend, err := InitBackend(params)
+		if err != nil {
+			t.Errorf("Error creating backend %v: %q", params, err)
+			continue
+		}
+
+		for patternIndex, pattern := range testPatterns {
+			t.Run(fmt.Sprintf("%s_%d_%d-%d-%d",
+				params.Name, params.K, params.M,
+				patternIndex,
+				len(pattern)),
+				func(t *testing.T) {
+					data, err := backend.EncodeMatrix(pattern, 32768)
+					if err != nil {
+						t.Errorf("Error encoding %v: %q", params, err)
+						return
+					}
+					defer data.Free()
+
+					frags := data.Data
+					decode := func(frags [][]byte, description string) bool {
+						decoded, err := backend.DecodeMatrix(frags, 32768)
+						if err != nil {
+							t.Errorf("%v: %v: %q for pattern %d", description, backend, err, patternIndex)
+							return false
+						} else if !bytes.Equal(decoded.Data, pattern) {
+							t.Errorf("%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, decoded.Data)
+							return false
+						}
+						decoded.Free()
+						return true
+					}
+
+					var good bool
+					good = decode(frags, "all frags")
+					good = good && decode(shuf(frags), "all frags, shuffled")
+					good = good && decode(frags[:params.K], "data frags")
+					good = good && decode(shuf(frags[:params.K]), "shuffled data frags")
+					good = good && decode(frags[params.M:], "with parity frags")
+					good = good && decode(shuf(frags[params.M:]), "shuffled parity frags")
+
+					if !good {
+						return
+					}
+
+					// remove := func(s [][]byte, i int) [][]byte {
+					// 	s[i] = s[len(s)-1]
+					// 	return s[:len(s)-1]
+					// }
+
+					for fIdx := 0; fIdx < params.K; fIdx++ {
+						newFrags := frags[fIdx+1:]
+						if fIdx >= 1 {
+							newFrags = append(newFrags, frags[0:fIdx]...)
+						}
+						part, err := backend.ReconstructMatrix(newFrags, fIdx, 32768)
+						if err != nil {
+							t.Fatal("cannot reconstruct ", err)
+						}
+						if !bytes.Equal(part, frags[fIdx]) {
+							t.Fatalf("part %d reconstructed not equal to original len: %q != %q", fIdx, part, frags[fIdx])
+						}
+					}
+
+				})
+		}
+
+		err = backend.Close()
+		if err != nil {
+			t.Errorf("Error closing backend %v: %q", backend, err)
+		}
+	}
 }
