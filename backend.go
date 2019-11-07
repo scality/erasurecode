@@ -300,11 +300,12 @@ func AvailableBackends() (avail []string) {
 
 // Params describe the encoding/decoding parameters
 type Params struct {
-	Name string
-	K    int
-	M    int
-	W    int
-	HD   int
+	Name         string
+	K            int
+	M            int
+	W            int
+	HD           int
+	MaxBlockSize int
 }
 
 // Backend is a wrapper of a backend descriptor of liberasurecode
@@ -312,6 +313,39 @@ type Backend struct {
 	Params
 	libecDesc  C.int
 	headerSize int
+	pool       *pool
+}
+
+type pool struct {
+	p   sync.Pool
+	max int
+}
+
+// The max buffer size we can get from the pool.
+// Assuming a splitSize around 2MiB or less
+const maxBuffer int = 2 * 1024 * 1024
+
+func (p *pool) New(size int) (interface{}, []byte) {
+	if size <= p.max {
+		b := p.p.Get().(*bytes.Buffer)
+		return b, b.Bytes()
+	}
+	// Should never happen
+	return nil, make([]byte, size)
+}
+
+func (p *pool) Release(b interface{}) {
+	if b != nil {
+		p.p.Put(b)
+	}
+}
+
+var globalPool = &pool{
+	p: sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(make([]byte, maxBuffer))
+		}},
+	max: maxBuffer,
 }
 
 // BackendIsAvailable check a backend availability
@@ -325,7 +359,7 @@ func BackendIsAvailable(name string) bool {
 
 // InitBackend returns a backend descriptor according params provided
 func InitBackend(params Params) (Backend, error) {
-	backend := Backend{params, 0, int(C.getHeaderSize())}
+	backend := Backend{params, 0, int(C.getHeaderSize()), nil}
 	id, err := nameToID(backend.Name)
 	if err != nil {
 		return backend, err
@@ -341,6 +375,22 @@ func InitBackend(params Params) (Backend, error) {
 		return backend, fmt.Errorf("instance_create() returned %v", errToName(-desc))
 	}
 	backend.libecDesc = desc
+
+	// Create a pool to store the decoded data
+	// Let's have a global pool for everything small enough
+	// and create a dedicated one if this is too large to fit.
+	if params.MaxBlockSize <= globalPool.max {
+		backend.pool = globalPool
+	} else {
+		backend.pool = &pool{
+			p: sync.Pool{
+				New: func() interface{} {
+					return bytes.NewBuffer(make([]byte, params.MaxBlockSize))
+				}},
+			max: params.MaxBlockSize,
+		}
+	}
+
 	// Workaround on init bug of Jerasure
 	// Apparently, jerasure will crash if the
 	// first encode is done concurrently with other encode.
@@ -461,39 +511,35 @@ type DecodeData struct {
 	Free func()
 }
 
-// The max buffer size we can get from the pool.
-// Assuming a splitSize around 2MiB or less
-const maxBuffer = 2*1024*1024 + 1
+// // bufPool is a pool of bytes.Buffer of max size maxBuffer.
+// // It is up to the caller to wipe the buffer and make sure it
+// // does overflow it
+// var bufPool = sync.Pool{
+// 	New: func() interface{} {
+// 		return bytes.NewBuffer(make([]byte, maxBuffer))
+// 	},
+// }
 
-// bufPool is a pool of bytes.Buffer of max size maxBuffer.
-// It is up to the caller to wipe the buffer and make sure it
-// does overflow it
-var bufPool = sync.Pool{
-	New: func() interface{} {
-		return bytes.NewBuffer(make([]byte, maxBuffer))
-	},
-}
+// // getBuffer returns a []byte with a minimum size of `size`
+// // @Note: it may be larger, you want to "reslice" it before.
+// // One must call releaseBuffer on the first returned value
+// // to release the buffer
+// func getBuffer(size int) (interface{}, []byte) {
+// 	if size < maxBuffer {
+// 		b := bufPool.Get().(*bytes.Buffer)
+// 		return b, b.Bytes()
+// 	}
+// 	return nil, make([]byte, size)
+// }
 
-// getBuffer returns a []byte with a minimum size of `size`
-// @Note: it may be larger, you want to "reslice" it before.
-// One must call releaseBuffer on the first returned value
-// to release the buffer
-func getBuffer(size int) (interface{}, []byte) {
-	if size < maxBuffer {
-		b := bufPool.Get().(*bytes.Buffer)
-		return b, b.Bytes()
-	}
-	return nil, make([]byte, size)
-}
-
-// releaseBuffer returns the underneath buffer to the pool
-// It is NOT safe to use the associated []byte array after releasing
-// it. Passing `nil` is safe.
-func releaseBuffer(buf interface{}) {
-	if buf != nil {
-		bufPool.Put(buf)
-	}
-}
+// // releaseBuffer returns the underneath buffer to the pool
+// // It is NOT safe to use the associated []byte array after releasing
+// // it. Passing `nil` is safe.
+// func releaseBuffer(buf interface{}) {
+// 	if buf != nil {
+// 		bufPool.Put(buf)
+// 	}
+// }
 
 // DecodeMatrix decode all the subchunk of frags, and linearize data
 func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData, error) {
@@ -511,7 +557,7 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 	}
 
 	// allocate output buffer
-	dataB, data := getBuffer(numBlock * piecesize * backend.K)
+	dataB, data := backend.pool.New(numBlock * piecesize * backend.K)
 
 	errorNb := uint32(0)
 	totLen := uint64(0)
@@ -547,7 +593,7 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 	// if we got some issues, fallback on "slow" decoding
 	if errorNb != 0 {
 		// Release the previous buffer
-		releaseBuffer(dataB)
+		backend.pool.Release(dataB)
 		return backend.decodeMatrixSlow(frags, piecesize)
 	}
 
@@ -555,7 +601,7 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 	// the DecodeData.Data will not be used anymore
 	return &DecodeData{data[:totLen:totLen],
 			func() {
-				releaseBuffer(dataB)
+				backend.pool.Release(dataB)
 			}},
 		nil
 
@@ -570,7 +616,7 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 		blockNr++
 	}
 
-	dataB, data := getBuffer(blockNr * piecesize * backend.K)
+	dataB, data := backend.pool.New(blockNr * piecesize * backend.K)
 
 	cellSize := piecesize + backend.headerSize
 
@@ -590,7 +636,7 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 		subdata.Free()
 	}
 	return &DecodeData{data[:totLen:totLen], func() {
-		releaseBuffer(dataB)
+		backend.pool.Release(dataB)
 	}}, nil
 }
 

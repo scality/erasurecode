@@ -16,6 +16,8 @@ var validParams = []Params{
 	{Name: "liberasurecode_rs_vand", K: 8, M: 4},
 	{Name: "liberasurecode_rs_vand", K: 15, M: 4},
 	{Name: "isa_l_rs_vand", K: 2, M: 1},
+	{Name: "isa_l_rs_vand", K: 2, M: 1, MaxBlockSize: 1},
+	{Name: "isa_l_rs_vand", K: 2, M: 1, MaxBlockSize: maxBuffer * 2},
 	{Name: "isa_l_rs_vand", K: 10, M: 4},
 	{Name: "isa_l_rs_vand", K: 4, M: 3},
 	{Name: "isa_l_rs_vand", K: 8, M: 4},
@@ -554,7 +556,11 @@ func (d decodeTest) String() string {
 
 var decodeTests = []decodeTest{
 	{1024 * 1024, Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5}},
-	{4 * 100000, Params{Name: "isa_l_rs_vand", K: 5, M: 7}},
+	{5 * 100000, Params{Name: "isa_l_rs_vand", K: 5, M: 7}},
+	// Will force an allocation of a new (dedicated) pool
+	{10000000, Params{Name: "isa_l_rs_vand", K: 2, M: 1, MaxBlockSize: 10000000 + maxBuffer}},
+	// Will force an allocation at every encoding (but should work)
+	{maxBuffer * 2, Params{Name: "isa_l_rs_vand", K: 2, M: 1, MaxBlockSize: maxBuffer / 2}},
 }
 
 func BenchmarkDecodeM(b *testing.B) {
