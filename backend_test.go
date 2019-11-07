@@ -543,103 +543,145 @@ func BenchmarkEncode(b *testing.B) {
 const DefaultChunkSize = 32768
 const DefaultFragSize = 1048576
 
+type decodeTest struct {
+	size int
+	p    Params
+}
+
+func (d decodeTest) String() string {
+	return fmt.Sprintf("%s-%d+%d-%db", d.p.Name, d.p.K, d.p.M, d.size)
+}
+
+var decodeTests = []decodeTest{
+	{1024 * 1024, Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5}},
+	{4 * 100000, Params{Name: "isa_l_rs_vand", K: 5, M: 7}},
+}
+
 func BenchmarkDecodeM(b *testing.B) {
-	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
-
-	buf := bytes.Repeat([]byte("A"), 1024*1024)
-	encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
-
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer encoded.Free()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		decoded, err := backend.DecodeMatrix(encoded.Data, DefaultChunkSize)
-		if err != nil {
-			b.Fatal(err)
-		}
-		if decoded != nil {
-			if decoded.Free != nil {
-				decoded.Free()
+	for _, test := range decodeTests {
+		b.Run(test.String(), func(b *testing.B) {
+			backend, err := InitBackend(test.p)
+			if err != nil {
+				b.Fatal("cannot create backend", err)
 			}
-		} else {
-			b.Fatal("decoded is nil")
-		}
+			defer backend.Close()
+
+			buf := bytes.Repeat([]byte("A"), test.size)
+			encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer encoded.Free()
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				decoded, err := backend.DecodeMatrix(encoded.Data, DefaultChunkSize)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if decoded != nil {
+					if decoded.Free != nil {
+						decoded.Free()
+					}
+				} else {
+					b.Fatal("decoded is nil")
+				}
+			}
+		})
 	}
-	backend.Close()
 }
 
 func BenchmarkDecodeMissingM(b *testing.B) {
-	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
-
-	buf := bytes.Repeat([]byte("A"), 1024*1024)
-	encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
-
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer encoded.Free()
-
-	data := encoded.Data[1:]
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		decoded, err := backend.DecodeMatrix(data, DefaultChunkSize)
-		if err != nil {
-			b.Fatal(err)
-		}
-		if decoded != nil {
-			if decoded.Free != nil {
-				decoded.Free()
+	for _, test := range decodeTests {
+		b.Run(test.String(), func(b *testing.B) {
+			backend, err := InitBackend(test.p)
+			if err != nil {
+				b.Fatal("cannot create backend", err)
 			}
-		} else {
-			b.Fatal("decoded is nil")
-		}
+			defer backend.Close()
+
+			buf := bytes.Repeat([]byte("A"), test.size)
+			encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer encoded.Free()
+
+			data := encoded.Data[1:]
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				decoded, err := backend.DecodeMatrix(data, DefaultChunkSize)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if decoded != nil {
+					if decoded.Free != nil {
+						decoded.Free()
+					}
+				} else {
+					b.Fatal("decoded is nil")
+				}
+			}
+		})
 	}
-	backend.Close()
 }
 
 func BenchmarkReconstructM(b *testing.B) {
-	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
+	for _, test := range decodeTests {
+		b.Run(test.String(), func(b *testing.B) {
+			backend, err := InitBackend(test.p)
+			if err != nil {
+				b.Fatal("cannot create backend", err)
+			}
+			defer backend.Close()
 
-	buf := bytes.Repeat([]byte("A"), 1024*1024)
-	encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+			buf := bytes.Repeat([]byte("A"), test.size)
+			encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
 
-	if err != nil {
-		b.Fatal(err)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer encoded.Free()
+			flags := encoded.Data[1:]
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, err := backend.ReconstructMatrix(flags, 0, DefaultChunkSize)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
-	defer encoded.Free()
-	flags := encoded.Data[1:]
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, err := backend.ReconstructMatrix(flags, 0, DefaultChunkSize)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-	backend.Close()
 }
 
 func BenchmarkDecodeMSlow(b *testing.B) {
-	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
-	buf := bytes.Repeat([]byte("A"), 1024*1024)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+	for _, test := range decodeTests {
+		b.Run(test.String(), func(b *testing.B) {
+			backend, err := InitBackend(test.p)
+			if err != nil {
+				b.Fatal("cannot create backend", err)
+			}
 
-		if err != nil {
-			b.Fatal(err)
-		}
+			buf := bytes.Repeat([]byte("A"), test.size)
+			encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
 
-		decoded, err := backend.decodeMatrixSlow(encoded.Data, DefaultChunkSize)
-		if err != nil {
-			b.Fatal(err)
-		}
-		encoded.Free()
-		decoded.Free()
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer encoded.Free()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+
+				decoded, err := backend.decodeMatrixSlow(encoded.Data, DefaultChunkSize)
+				if err != nil {
+					b.Fatal(err)
+				}
+				decoded.Free()
+			}
+		})
 	}
-	backend.Close()
 }
 
 func BenchmarkEncodeM(b *testing.B) {

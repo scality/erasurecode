@@ -461,6 +461,40 @@ type DecodeData struct {
 	Free func()
 }
 
+// The max buffer size we can get from the pool.
+// Assuming a splitSize around 2MiB or less
+const maxBuffer = 2*1024*1024 + 1
+
+// bufPool is a pool of bytes.Buffer of max size maxBuffer.
+// It is up to the caller to wipe the buffer and make sure it
+// does overflow it
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, maxBuffer))
+	},
+}
+
+// getBuffer returns a []byte with a minimum size of `size`
+// @Note: it may be larger, you want to "reslice" it before.
+// One must call releaseBuffer on the first returned value
+// to release the buffer
+func getBuffer(size int) (interface{}, []byte) {
+	if size < maxBuffer {
+		b := bufPool.Get().(*bytes.Buffer)
+		return b, b.Bytes()
+	}
+	return nil, make([]byte, size)
+}
+
+// releaseBuffer returns the underneath buffer to the pool
+// It is NOT safe to use the associated []byte array after releasing
+// it. Passing `nil` is safe.
+func releaseBuffer(buf interface{}) {
+	if buf != nil {
+		bufPool.Put(buf)
+	}
+}
+
 // DecodeMatrix decode all the subchunk of frags, and linearize data
 func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData, error) {
 	var wg sync.WaitGroup
@@ -477,29 +511,26 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 	}
 
 	// allocate output buffer
-	data := make([]byte, numBlock*piecesize*backend.K)
+	dataB, data := getBuffer(numBlock * piecesize * backend.K)
 
 	errorNb := uint32(0)
 	totLen := uint64(0)
 	wg.Add(numBlock)
 
 	for i := 0; i < numBlock; i++ {
-		currBlock := i
 		// launch goroutines, providing them a subrange of the final buffer so it can be used
 		// in concurrency without need to lock it access
 		go func(blockNr int) {
 			cFrags := C.makeStrArray(C.int(len(frags)))
 			// prepare the C array of pointer, respecting the offset in each fragments
 			for index, frags := range frags {
-				ptr := unsafe.Pointer(&frags[blockNr*lenBlock])
-				cSetArrayItem(cFrags, index, (*C.char)(ptr))
+				cSetArrayItem(cFrags, index, (*C.char)(unsafe.Pointer(&frags[blockNr*lenBlock])))
 			}
 			// try to decode fastly (if we have all data fragments), providing the good offset of the
 			// linearized buffer, according the block number we are decoding
 			var outlen C.uint64_t
-			pos := &data[blockNr*piecesize*backend.K]
 			p := C.decode_fast(C.int(backend.K), cFrags, C.int(len(frags)),
-				(*C.char)(unsafe.Pointer(pos)),
+				(*C.char)(unsafe.Pointer(&data[blockNr*piecesize*backend.K])),
 				C.uint64_t(piecesize*backend.K), &outlen)
 
 			if p == nil {
@@ -509,20 +540,22 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 			}
 			C.freeStrArray(cFrags)
 			wg.Done()
-		}(currBlock)
+		}(i)
 	}
 	wg.Wait()
 
 	// if we got some issues, fallback on "slow" decoding
 	if errorNb != 0 {
-		//C.free(unsafe.Pointer(data))
+		// Release the previous buffer
+		releaseBuffer(dataB)
 		return backend.decodeMatrixSlow(frags, piecesize)
 	}
 
 	// return our linearized data. Closure expect to free the C allocated data once
 	// the DecodeData.Data will not be used anymore
-	return &DecodeData{data[:int(totLen):int(totLen)],
+	return &DecodeData{data[:totLen:totLen],
 			func() {
+				releaseBuffer(dataB)
 			}},
 		nil
 
@@ -536,23 +569,29 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 	if blockNr*blockSize != fragLen {
 		blockNr++
 	}
-	data := make([]byte, 0, blockNr*piecesize*backend.K)
+
+	dataB, data := getBuffer(blockNr * piecesize * backend.K)
 
 	cellSize := piecesize + backend.headerSize
+
+	var totLen int64 = 0
 
 	for i := 0; i < blockNr; i++ {
 		vect := make([][]byte, len(frags))
 		for j := 0; j < len(frags); j++ {
-			vect[j] = frags[j][i*cellSize:(i+1)*cellSize]
+			vect[j] = frags[j][i*cellSize : (i+1)*cellSize]
 		}
 		subdata, err := backend.Decode(vect)
 		if err != nil {
 			return nil, fmt.Errorf("error subdecoding %d cause =%v", i, err)
 		}
-		data = append(data, subdata.Data...)
+		copy(data[totLen:], subdata.Data)
+		totLen += int64(len(subdata.Data))
 		subdata.Free()
 	}
-	return &DecodeData{data, func() {}}, nil
+	return &DecodeData{data[:totLen:totLen], func() {
+		releaseBuffer(dataB)
+	}}, nil
 }
 
 // RangeMatrix describes informations needed to decode a range of encoded frags
@@ -628,9 +667,9 @@ func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 		nil
 }
 
-func (backend *Backend) reconstruct(frags [][]byte, fragIndex int, data[]byte) error {
+func (backend *Backend) reconstruct(frags [][]byte, fragIndex int, data []byte) error {
 	if len(frags) == 0 {
-		return  errors.New("reconstruction requires at least one fragment")
+		return errors.New("reconstruction requires at least one fragment")
 	}
 
 	pData := (*C.char)(unsafe.Pointer(&data[0]))
@@ -661,7 +700,7 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 	fragLength := len(frags[0])
 	data := make([]byte, fragLength)
 
-	if err := backend.reconstruct(frags, fragIndex, data) ; err != nil {
+	if err := backend.reconstruct(frags, fragIndex, data); err != nil {
 		return nil, err
 	}
 	return data, nil
@@ -687,9 +726,9 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksi
 	for i := 0; i < blockNr; i++ {
 		vect := make([][]byte, len(frags))
 		for j := 0; j < len(frags); j++ {
-			vect[j] = frags[j][i*cellSize:(i+1)*cellSize]
+			vect[j] = frags[j][i*cellSize : (i+1)*cellSize]
 		}
-		if err := backend.reconstruct(vect, fragIndex, data[i * blockSize:]) ; err != nil {
+		if err := backend.reconstruct(vect, fragIndex, data[i*blockSize:]); err != nil {
 			return nil, fmt.Errorf("error subdecoding %d cause =%v", i, err)
 		}
 	}
