@@ -634,6 +634,34 @@ func BenchmarkDecodeMissingM(b *testing.B) {
 	}
 }
 
+func BenchmarkReconstruct(b *testing.B) {
+	for _, test := range decodeTests {
+		b.Run(test.String(), func(b *testing.B) {
+			backend, err := InitBackend(test.p)
+			if err != nil {
+				b.Fatal("cannot create backend", err)
+			}
+			defer backend.Close()
+
+			buf := bytes.Repeat([]byte("A"), test.size)
+			encoded, err := backend.Encode(buf)
+
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer encoded.Free()
+			flags := encoded.Data[1:]
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, err := backend.Reconstruct(flags, 0)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkReconstructM(b *testing.B) {
 	for _, test := range decodeTests {
 		b.Run(test.String(), func(b *testing.B) {
@@ -653,10 +681,11 @@ func BenchmarkReconstructM(b *testing.B) {
 			flags := encoded.Data[1:]
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, err := backend.ReconstructMatrix(flags, 0, DefaultChunkSize)
+				ddata, err := backend.ReconstructMatrix(flags, 0, DefaultChunkSize)
 				if err != nil {
 					b.Fatal(err)
 				}
+				ddata.Free()
 			}
 		})
 	}
@@ -886,15 +915,16 @@ func TestReconstructM(t *testing.T) {
 				}
 			}
 
-			fragment, err := backend.ReconstructMatrix(vect, p.fragNumber, p.chunkUnit)
+			ddata, err := backend.ReconstructMatrix(vect, p.fragNumber, p.chunkUnit)
 			if err != nil {
 				t.Errorf("cannot reconstruct fragment %d cause=%v", p.fragNumber, err)
 			}
-			if fragment == nil {
+			if ddata == nil {
 				t.Errorf("unexpected error / fragment rebuilt is nil")
 			}
 
-			res := bytes.Compare(fragment, result.Data[p.fragNumber])
+			res := bytes.Compare(ddata.Data, result.Data[p.fragNumber])
+			ddata.Free()
 			if res != 0 {
 				t.Errorf("Error, fragment rebuilt is different from the original one")
 			}
@@ -967,13 +997,15 @@ func TestEncodeDecodeMatrix(t *testing.T) {
 						if fIdx >= 1 {
 							newFrags = append(newFrags, frags[0:fIdx]...)
 						}
-						part, err := backend.ReconstructMatrix(newFrags, fIdx, 32768)
+						ddata, err := backend.ReconstructMatrix(newFrags, fIdx, 32768)
 						if err != nil {
 							t.Fatal("cannot reconstruct ", err)
 						}
-						if !bytes.Equal(part, frags[fIdx]) {
-							t.Fatalf("part %d reconstructed not equal to original len: %q != %q", fIdx, part, frags[fIdx])
+						if !bytes.Equal(ddata.Data, frags[fIdx]) {
+							ddata.Free()
+							t.Fatalf("part %d reconstructed not equal to original len: %q != %q", fIdx, ddata.Data, frags[fIdx])
 						}
+						ddata.Free()
 					}
 
 				})
