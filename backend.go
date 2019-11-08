@@ -620,7 +620,7 @@ func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*Decode
 
 	cellSize := piecesize + backend.headerSize
 
-	var totLen int64 = 0
+	var totLen int64
 
 	for i := 0; i < blockNr; i++ {
 		vect := make([][]byte, len(frags))
@@ -753,7 +753,8 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 }
 
 // ReconstructMatrix is a really not optimized yet reconstruction of a frag containing subchunking
-func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksize int) ([]byte, error) {
+func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksize int) (*DecodeData, error) {
+	var wg sync.WaitGroup
 	if len(frags) == 0 {
 		return nil, errors.New("reconstruction requires at least one fragment")
 	}
@@ -764,21 +765,34 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksi
 	if blockNr*blockSize != fragLen {
 		blockNr++
 	}
-	data := make([]byte, fragLen)
+	dlen := blockNr * blockSize
+	dataB, data := backend.pool.New(dlen)
+
 
 	cellSize := chunksize + backend.headerSize
 
+	var errCounter uint32
 	// TODO use goroutines here to leverage multicore computation
+	wg.Add(blockNr)
 	for i := 0; i < blockNr; i++ {
-		vect := make([][]byte, len(frags))
-		for j := 0; j < len(frags); j++ {
-			vect[j] = frags[j][i*cellSize : (i+1)*cellSize]
-		}
-		if err := backend.reconstruct(vect, fragIndex, data[i*blockSize:]); err != nil {
-			return nil, fmt.Errorf("error subdecoding %d cause =%v", i, err)
-		}
+		go func (blocknr int) {
+			vect := make([][]byte, len(frags))
+			for j := 0; j < len(frags); j++ {
+				vect[j] = frags[j][blocknr*cellSize : (blocknr+1)*cellSize]
+			}
+			if err := backend.reconstruct(vect, fragIndex, data[blocknr*blockSize:]); err != nil {
+				atomic.AddUint32(&errCounter, 1)
+			}
+			wg.Done()
+		}(i)
 	}
-	return data, nil
+	wg.Wait()
+	if errCounter != 0 {
+		return nil, errors.New("sub reconstruction failed")
+	}
+	return &DecodeData{data[:dlen:dlen], func() {
+		backend.pool.Release(dataB)
+	}}, nil
 }
 
 // IsInvalidFragment is a wrapper on C implementation
