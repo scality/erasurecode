@@ -298,6 +298,10 @@ func AvailableBackends() (avail []string) {
 	return
 }
 
+const ChecksumNone = C.CHKSUM_NONE
+const ChecksumCrc32 = C.CHKSUM_CRC32
+const ChecksumXxhash = C.CHKSUM_XXHASH
+
 // Params describe the encoding/decoding parameters
 type Params struct {
 	Name         string
@@ -306,6 +310,7 @@ type Params struct {
 	W            int
 	HD           int
 	MaxBlockSize int
+	Checksum     int
 }
 
 // Backend is a wrapper of a backend descriptor of liberasurecode
@@ -359,6 +364,10 @@ func BackendIsAvailable(name string) bool {
 
 // InitBackend returns a backend descriptor according params provided
 func InitBackend(params Params) (Backend, error) {
+	if params.Checksum == 0 {
+		params.Checksum = ChecksumXxhash
+	}
+
 	backend := Backend{params, 0, int(C.getHeaderSize()), nil}
 	id, err := nameToID(backend.Name)
 	if err != nil {
@@ -369,7 +378,7 @@ func InitBackend(params Params) (Backend, error) {
 		m:  C.int(backend.M),
 		w:  C.int(backend.W),
 		hd: C.int(backend.HD),
-		ct: C.CHKSUM_CRC32,
+		ct: C.ec_checksum_type_t(params.Checksum),
 	})
 	if desc < 0 {
 		return backend, fmt.Errorf("instance_create() returned %v", errToName(-desc))
@@ -768,14 +777,13 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksi
 	dlen := blockNr * blockSize
 	dataB, data := backend.pool.New(dlen)
 
-
 	cellSize := chunksize + backend.headerSize
 
 	var errCounter uint32
 	// TODO use goroutines here to leverage multicore computation
 	wg.Add(blockNr)
 	for i := 0; i < blockNr; i++ {
-		go func (blocknr int) {
+		go func(blocknr int) {
 			vect := make([][]byte, len(frags))
 			for j := 0; j < len(frags); j++ {
 				vect[j] = frags[j][blocknr*cellSize : (blocknr+1)*cellSize]

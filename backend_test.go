@@ -557,6 +557,7 @@ func (d decodeTest) String() string {
 }
 
 var decodeTests = []decodeTest{
+	{1000 * 1000, Params{Name: "isa_l_rs_vand", K: 5, M: 1}},
 	{1024 * 1024, Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5}},
 	{5 * 100000, Params{Name: "isa_l_rs_vand", K: 5, M: 7}},
 	// Will force an allocation of a new (dedicated) pool
@@ -721,21 +722,58 @@ func BenchmarkDecodeMSlow(b *testing.B) {
 	}
 }
 
-func BenchmarkEncodeM(b *testing.B) {
-	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
-
-	buf := bytes.Repeat([]byte("A"), 1024*1024)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		encoded, err := backend.EncodeMatrix(buf, 32768)
-
-		if err != nil {
-			b.Fatal(err)
-		}
-		encoded.Free()
+func BenchmarkMatrix(b *testing.B) {
+	for _, dtest := range decodeTests {
+		blockSize := 32768
+		// If you want 1 single block per fragment use:
+		// blockSize := (dtest.size + dtest.p.K - 1) / dtest.p.K
+		buf := bytes.Repeat([]byte("X"), dtest.size)
+		b.Run(fmt.Sprintf("%s:%d+%d,size=%d", dtest.p.Name, dtest.p.K, dtest.p.M, dtest.size),
+			func(b *testing.B) {
+				for _, crc := range []int{ /* ChecksumNone, */ ChecksumCrc32, ChecksumXxhash} {
+					b.Run(fmt.Sprintf("crc=%v", crc),
+						func(b *testing.B) {
+							dtest.p.Checksum = crc
+							backend, _ := InitBackend(dtest.p)
+							b.Run("Encode", func(b *testing.B) {
+								b.ResetTimer()
+								for i := 0; i < b.N; i++ {
+									encoded, err := backend.EncodeMatrix(buf, blockSize)
+									if err != nil {
+										b.Fatal(err)
+									}
+									encoded.Free()
+								}
+							})
+							b.Run("Decode", func(b *testing.B) {
+								encoded, _ := backend.EncodeMatrix(buf, blockSize)
+								defer encoded.Free()
+								b.ResetTimer()
+								for i := 0; i < b.N; i++ {
+									decoded, err := backend.DecodeMatrix(encoded.Data, blockSize)
+									if err != nil {
+										b.Fatal(err)
+									}
+									decoded.Free()
+								}
+							})
+							b.Run("Reconstruct", func(b *testing.B) {
+								encoded, _ := backend.EncodeMatrix(buf, blockSize)
+								defer encoded.Free()
+								b.ResetTimer()
+								for i := 0; i < b.N; i++ {
+									decoded, err := backend.ReconstructMatrix(encoded.Data[1:], 0, blockSize)
+									if err != nil {
+										b.Fatal(err)
+									}
+									decoded.Free()
+								}
+							})
+							backend.Close()
+						})
+				}
+			})
 	}
-	backend.Close()
 }
 
 func BenchmarkDecode(b *testing.B) {
@@ -921,9 +959,11 @@ func TestReconstructM(t *testing.T) {
 			ddata, err := backend.ReconstructMatrix(vect, p.fragNumber, p.chunkUnit)
 			if err != nil {
 				t.Errorf("cannot reconstruct fragment %d cause=%v", p.fragNumber, err)
+				return
 			}
 			if ddata == nil {
 				t.Errorf("unexpected error / fragment rebuilt is nil")
+				return
 			}
 
 			res := bytes.Compare(ddata.Data, result.Data[p.fragNumber])
