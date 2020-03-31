@@ -6,9 +6,11 @@ package erasurecode
 #include <liberasurecode/erasurecode.h>
 #include <liberasurecode/erasurecode_helpers_ext.h>
 #include <liberasurecode/erasurecode_postprocessing.h>
+
 // shims to make working with frag arrays easier
 char ** makeStrArray(int n) { return calloc(n, sizeof (char *)); }
 void freeStrArray(char ** arr) { free(arr); }
+
 // shims because the fragment headers use misaligned fields
 uint64_t getOrigDataSize(struct fragment_header_s *header) { return header->meta.orig_data_size; }
 uint32_t getBackendVersion(struct fragment_header_s *header) { return header->meta.backend_version; }
@@ -26,71 +28,72 @@ int getHeaderSize() { return sizeof(struct fragment_header_s); }
 // 'destlen' is the buffer size, and hence, the maximum number of bytes linearized
 // 'outlen' is a pointer containing the number of bytes really linearized in dest (always lower or equal to destlen)
 // it returns dest if nothing went wrong, else null
-char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uint64_t *outlen)
-{
-        int i;
-        int curr_idx = 0;
-        int orig_data_size = -1;
-        char *frags[k];
-        // cannot decode fastly
-        if (inlen < k) {
-            return NULL;
-        }
-        if (dest == NULL || outlen == NULL) {
-            return NULL;
-        }
-	memset(frags, 0, sizeof(frags));
-	// we start by iterating on all fragment, and ordering according to the fragment index
-	// in the header all data fragment (fragment whose index is lower than k)
-        for (i = 0; i < inlen && curr_idx != k; i++) {
-                int index;
-                int data_size;
-                if (is_invalid_fragment_header((fragment_header_t*)in[i])) {
-                    continue;
-                }
-                index = get_fragment_idx(in[i]);
-                data_size = get_fragment_payload_size(in[i]);
-                if (index < 0 || data_size < 0) {
-                    continue;
-                }
-                if (orig_data_size < 0) {
-                    orig_data_size = get_orig_data_size(in[i]);
-                } else if(get_orig_data_size(in[i]) != orig_data_size) {
-                    continue;
-                }
-                if (index >= k) {
-                    continue;
-                }
-                if (frags[index] == NULL) {
-                    curr_idx ++;
-                    frags[index] = in[i];
-                }
-        }
-        // if we don't have enough data fragment, we leave this function and will probably
-        // fallback on a true deocodin function
-        if (curr_idx != k) {
-            return NULL;
-        }
+char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uint64_t *outlen) {
+    int i;
+    int curr_idx = 0;
+    int orig_data_size = -1;
+    char *frags[k];
+    // cannot decode fastly
+    if (inlen < k) {
+        return NULL;
+    }
+    if (dest == NULL || outlen == NULL) {
+        return NULL;
+    }
+    memset(frags, 0, sizeof(frags));
 
-        // compute how number of bytes will be linearized
-        int tocopy = orig_data_size;
-        int string_off = 0;
-        *outlen = orig_data_size;
-        if(destlen < orig_data_size) {
-            *outlen = destlen;
-            tocopy = destlen;
+    // we start by iterating on all fragment, and ordering according to the fragment index
+    // in the header all data fragment (fragment whose index is lower than k)
+    for (i = 0; i < inlen && curr_idx != k; i++) {
+        int index;
+        int data_size;
+        if (is_invalid_fragment_header((fragment_header_t*)in[i])) {
+            continue;
         }
+        index = get_fragment_idx(in[i]);
+        data_size = get_fragment_payload_size(in[i]);
+        if (index < 0 || data_size < 0) {
+            continue;
+        }
+        if (orig_data_size < 0) {
+            orig_data_size = get_orig_data_size(in[i]);
+        } else if(get_orig_data_size(in[i]) != orig_data_size) {
+            continue;
+        }
+        if (index >= k) {
+            continue;
+        }
+        if (frags[index] == NULL) {
+            curr_idx ++;
+            frags[index] = in[i];
+        }
+    }
 
-        // copy in an ordered way all bytes of fragments in the buffer
-        for (i = 0; i < k && tocopy > 0; i++) {
-            char *f = get_data_ptr_from_fragment(frags[i]);
-            int fsize = get_fragment_payload_size(frags[i]);
-            int psize = tocopy > fsize ? fsize : tocopy;
-            memcpy(dest + string_off, f, psize);
-            tocopy -= psize;
-            string_off += psize;
-        }
-        return dest;
+    // if we don't have enough data fragment, we leave this function and will probably
+    // fallback on a true decoding function
+    if (curr_idx != k) {
+        return NULL;
+    }
+
+    // compute how number of bytes will be linearized
+    int tocopy = orig_data_size;
+    int string_off = 0;
+    *outlen = orig_data_size;
+    if(destlen < orig_data_size) {
+        *outlen = destlen;
+        tocopy = destlen;
+    }
+
+    // copy in an ordered way all bytes of fragments in the buffer
+    for (i = 0; i < k && tocopy > 0; i++) {
+        char *f = get_data_ptr_from_fragment(frags[i]);
+        int fsize = get_fragment_payload_size(frags[i]);
+        int psize = tocopy > fsize ? fsize : tocopy;
+        memcpy(dest + string_off, f, psize);
+        tocopy -= psize;
+        string_off += psize;
+    }
+    return dest;
 }
 
 
@@ -106,6 +109,19 @@ struct encode_chunk_context {
     int m;
 };
 
+static inline void *alloc_data(size_t len) {
+    void *buf;
+    if (posix_memalign(&buf, 16, len) != 0) {
+        return NULL;
+    }
+    memset(buf, 0, len);
+    return buf;
+}
+
+static inline void dealloc_data(void *pt, size_t len) {
+    free(pt);
+}
+
 // instead of encoding K blocks of data, we divide and subencode blocks of
 // 'piecesize' bytes.
 // 'desc'  : liberasurecode handle
@@ -115,10 +131,10 @@ struct encode_chunk_context {
 // 'ctx' : contains informations such as the ECN schema (see below)
 //
 void encode_chunk_prepare(int desc,
-                          char *data,
-                          int datalen,
-                          int piecesize,
-                          struct encode_chunk_context *ctx)
+    char *data,
+    int datalen,
+    int piecesize,
+	struct encode_chunk_context *ctx)
 {
     ctx->instance = liberasurecode_backend_instance_get_by_desc(desc);
     int i;
@@ -129,7 +145,7 @@ void encode_chunk_prepare(int desc,
     int block_size = piecesize * k;
     ctx->number_of_subgroup = datalen / block_size;
     if(ctx->number_of_subgroup * block_size != datalen) {
-          ctx->number_of_subgroup++;
+        ctx->number_of_subgroup++;
     }
 
     ctx->chunk_size = piecesize;
@@ -142,14 +158,31 @@ void encode_chunk_prepare(int desc,
     ctx->frags_len = (sizeof(fragment_header_t) + piecesize) * ctx->number_of_subgroup;
 
     for (i = 0; i < ctx->k; ++i) {
-        ctx->datas[i] = get_aligned_buffer16(ctx->frags_len);
+        ctx->datas[i] = alloc_data(ctx->frags_len);
     }
 
     for (i = 0; i < ctx->m; ++i) {
-        ctx->codings[i] = get_aligned_buffer16(ctx->frags_len);
+        ctx->codings[i] = alloc_data(ctx->frags_len);
     }
+}
 
-  }
+// return real size of fragment header size
+size_t get_fragment_header_size() {
+    return sizeof(fragment_header_t);
+}
+
+int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context *ctx, int nth);
+
+int encode_chunk_all(int desc, char *data, int datalen, struct encode_chunk_context *ctx, int max) {
+    int i;
+    for (i = 0; i < max ; i++) {
+        int err = encode_chunk(desc, data, datalen, ctx, i);
+        if (err != 0) {
+            return err;
+        }
+    }
+    return 0;
+}
 
 // encode_chunk will encode a subset of the fragments data.
 // It has to be considered that all the datas will not be divided in K blocks, but instead,
@@ -192,7 +225,7 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
             memcpy(ptr, dataoffset, len_to_copy);
         }
         dataoffset += ctx->chunk_size;
-         k_ref[i] = ptr;
+        k_ref[i] = ptr;
     }
 
     for (i = 0; i < ctx->m; i++) {
@@ -209,6 +242,7 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
         fprintf(stderr, "error encode ret = %d\n", ret);
         return -1;
     }
+
     // fill the headers with true len, fragment len ....
     ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, tot_len_sum, k_ref, m_ref);
     if (ret < 0) {
@@ -217,6 +251,158 @@ int encode_chunk(int desc, char *data, int datalen, struct encode_chunk_context 
     }
     return 0;
 }
+
+int my_liberasurecode_encode_cleanup(int desc,
+    size_t len,
+    char **encoded_data,
+    char **encoded_parity)
+{
+    int i, k, m;
+
+    ec_backend_t instance = liberasurecode_backend_instance_get_by_desc(desc);
+    if (NULL == instance) {
+        return -EBACKENDNOTAVAIL;
+    }
+
+    k = instance->args.uargs.k;
+    m = instance->args.uargs.m;
+
+    if (encoded_data) {
+        for (i = 0; i < k; i++) {
+            dealloc_data(encoded_data[i], len);
+        }
+
+        free(encoded_data);
+    }
+
+    if (encoded_parity) {
+        for (i = 0; i < m; i++) {
+            dealloc_data(encoded_parity[i], len);
+        }
+        free(encoded_parity);
+    }
+
+    return 0;
+}
+
+// Prepare memory, allocating stuff. Suitable for "buffermatrix": no data fragments allocated.
+void encode_chunk_buffermatrix_prepare(int desc,
+    char *data,
+    int datalen,
+    int piecesize,
+    int frags_len,
+    int number_of_subgroup,
+    struct encode_chunk_context *ctx)
+{
+    ctx->instance = liberasurecode_backend_instance_get_by_desc(desc);
+    int i;
+    const int k = ctx->instance->args.uargs.k;
+    const int m = ctx->instance->args.uargs.m;
+
+    ctx->number_of_subgroup = number_of_subgroup;
+
+    ctx->chunk_size = piecesize;
+
+    ctx->k = k;
+    ctx->m = m;
+
+    ctx->codings   = calloc(ctx->m, sizeof(char*));
+    ctx->frags_len = frags_len;
+
+    for (i = 0; i < ctx->m; ++i) {
+        ctx->codings[i] = alloc_data(ctx->frags_len);
+    }
+}
+
+// Encode a chunk using a buffer matrix as an input
+// Same as above with the twist that data is not copied and can be directly
+static int encode_chunk_buffermatrix(int desc, char *data, int datalen, int nbFrags, struct encode_chunk_context *ctx, int nth)
+{
+    ec_backend_t ec = ctx->instance;
+    char *k_ref[ctx->k];
+    char *m_ref[ctx->m];
+    int one_cell_size = sizeof(fragment_header_t) + ctx->chunk_size;
+    int i, ret;
+    int tot_len_sum = 0;
+
+    if (nth >= ctx->number_of_subgroup) {
+        return -1;
+    }
+
+    // Create the array of "data" fragments
+    // No copy, just prepare the header
+    for (i = 0 ; i < ctx->k ; i ++) {
+        k_ref[i] = data + (nth + nbFrags * i) * one_cell_size;
+        fragment_header_t *hdr = (fragment_header_t*)k_ref[i];
+        hdr->magic = LIBERASURECODE_FRAG_HEADER_MAGIC;
+        char *ptr = (char*) (hdr + 1);
+        k_ref[i] = ptr;
+
+        // Computes actual data in the fragment
+        int size = datalen - (nth * ctx->k + i) * ctx->chunk_size;
+        tot_len_sum += size > 0 ? (size > ctx->chunk_size ? ctx->chunk_size: size) : 0;
+    }
+
+    // "coding" fragments. Those ones are allocated above
+    for (i = 0; i < ctx->m; i++) {
+        char *ptr = &ctx->codings[i][nth * one_cell_size];
+        fragment_header_t *hdr = (fragment_header_t*)ptr;
+        hdr->magic = LIBERASURECODE_FRAG_HEADER_MAGIC;
+        ptr = (char*) (hdr + 1);
+        m_ref[i] = ptr;
+    }
+
+    // do the true encoding according the backend used (isa-l, cauchy ....)
+    ret = ec->common.ops->encode(ec->desc.backend_desc, k_ref, m_ref, ctx->chunk_size);
+    if (ret < 0) {
+        fprintf(stderr, "error encode ret = %d\n", ret);
+        return -1;
+    }
+
+    ret = finalize_fragments_after_encode(ec, ctx->k, ctx->m, ctx->chunk_size, tot_len_sum, k_ref, m_ref);
+    if (ret < 0) {
+        fprintf(stderr, "error encode ret = %d\n", ret);
+        return -1;
+    }
+    return 0;
+}
+
+// Helper function to compute everything in one go
+int encode_chunk_buffermatrix_all(int desc, char *data, int datalen, int nbfrags, struct encode_chunk_context *ctx, int max) {
+    int i;
+
+    for (i = 0; i < max ; i++) {
+        int err = encode_chunk_buffermatrix(desc, data, datalen, nbfrags, ctx, i);
+        if (err != 0) {
+            return err;
+        }
+    }
+    return 0;
+}
+
+int my_liberasurecode_encode_buffermatrix_cleanup(int desc,
+    size_t len,
+    char **encoded_data,
+    char **encoded_parity)
+{
+    ec_backend_t instance = liberasurecode_backend_instance_get_by_desc(desc);
+    if (NULL == instance) {
+        return -EBACKENDNOTAVAIL;
+    }
+
+    const int m = instance->args.uargs.m;
+
+    if (encoded_parity) {
+        int i;
+        for (i = 0; i < m; i++) {
+            dealloc_data(encoded_parity[i], len);
+        }
+    }
+    free(encoded_parity);
+
+    return 0;
+}
+
 */
 import "C"
 import (
@@ -238,6 +424,10 @@ func cGetArrayItem(p **C.char, nth int) unsafe.Pointer {
 func cSetArrayItem(p **C.char, nth int, ptr *C.char) {
 	v1 := unsafe.Pointer(uintptr(unsafe.Pointer(p)) + uintptr(nth)*unsafe.Sizeof(p))
 	*((**C.char)(v1)) = (ptr)
+}
+
+func fragmentHeaderSize() int {
+	return int(C.get_fragment_header_size())
 }
 
 // Version describes the module version
@@ -458,8 +648,66 @@ func (backend *Backend) Encode(data []byte) (*EncodeData, error) {
 		result[i+backend.K] = (*[1 << 30]byte)(str)[:int(fragLength):int(fragLength)]
 	}
 	return &EncodeData{result, func() {
-		C.liberasurecode_encode_cleanup(
-			backend.libecDesc, dataFrags, parityFrags)
+		C.my_liberasurecode_encode_cleanup(
+			backend.libecDesc, C.size_t(fragLength), dataFrags, parityFrags)
+	}}, nil
+}
+
+// EncodeMatrixWithBufferMatrix encodes data in small subpart of chunkSize bytes
+func (backend *Backend) EncodeMatrixWithBufferMatrix(bm *BufferMatrix, chunkSize int) (*EncodeData, error) {
+	var wg sync.WaitGroup
+	var ctx C.struct_encode_chunk_context
+
+	data := bm.Bytes()
+	dataLen := bm.Length()
+
+	pData := (*C.char)(unsafe.Pointer(&data[0]))
+	pDataLen := C.int(dataLen)
+	cChunkSize := C.int(chunkSize)
+
+	nbFrags := C.int(bm.SubGroups())
+
+	C.encode_chunk_buffermatrix_prepare(backend.libecDesc, pData, pDataLen,
+		cChunkSize, C.int(bm.FragLen()), nbFrags, &ctx)
+
+	var errCounter uint32
+
+	wg.Add(int(ctx.number_of_subgroup))
+
+	for i := 0; i < int(ctx.number_of_subgroup); i++ {
+		go func(nth int) {
+			r := C.encode_chunk_buffermatrix(backend.libecDesc, pData, pDataLen, nbFrags, &ctx, C.int(nth))
+			if r < 0 {
+				atomic.AddUint32(&errCounter, 1)
+			}
+			wg.Done()
+		}(i)
+	}
+	wg.Wait()
+
+	if errCounter != 0 {
+		return &EncodeData{nil, func() {
+				C.my_liberasurecode_encode_buffermatrix_cleanup(
+					backend.libecDesc, C.size_t(ctx.frags_len), ctx.datas, ctx.codings)
+			}},
+			fmt.Errorf("error encoding chunk (%+v encoding failed)", errCounter)
+	}
+	result := make([][]byte, backend.K+backend.M)
+	fragLen := ctx.frags_len
+	flen := bm.FragLen()
+	for i := 0; i < backend.K; i++ {
+		result[i] = data[i*flen : (i+1)*flen]
+	}
+
+	for i := 0; i < backend.M; i++ {
+		str := cGetArrayItem(ctx.codings, i)
+		result[i+backend.K] = (*[1 << 30]byte)(str)[:int(C.int(fragLen)):int(C.int(fragLen))]
+	}
+
+	return &EncodeData{result, func() {
+		runtime.KeepAlive(bm)
+		C.my_liberasurecode_encode_buffermatrix_cleanup(
+			backend.libecDesc, C.size_t(ctx.frags_len), ctx.datas, ctx.codings)
 	}}, nil
 }
 
@@ -473,8 +721,10 @@ func (backend *Backend) EncodeMatrix(data []byte, chunkSize int) (*EncodeData, e
 
 	C.encode_chunk_prepare(backend.libecDesc, pData, pDataLen, cChunkSize, &ctx)
 
-	wg.Add(int(ctx.number_of_subgroup))
 	var errCounter uint32
+
+	wg.Add(int(ctx.number_of_subgroup))
+
 	for i := 0; i < int(ctx.number_of_subgroup); i++ {
 		go func(nth int) {
 			r := C.encode_chunk(backend.libecDesc, pData, pDataLen, &ctx, C.int(nth))
@@ -488,8 +738,8 @@ func (backend *Backend) EncodeMatrix(data []byte, chunkSize int) (*EncodeData, e
 
 	if errCounter != 0 {
 		return &EncodeData{nil, func() {
-				C.liberasurecode_encode_cleanup(
-					backend.libecDesc, ctx.datas, ctx.codings)
+				C.my_liberasurecode_encode_cleanup(
+					backend.libecDesc, C.size_t(ctx.frags_len), ctx.datas, ctx.codings)
 			}},
 			fmt.Errorf("error encoding chunk (%+v encoding failed)", errCounter)
 	}
@@ -506,8 +756,8 @@ func (backend *Backend) EncodeMatrix(data []byte, chunkSize int) (*EncodeData, e
 	}
 
 	return &EncodeData{result, func() {
-		C.liberasurecode_encode_cleanup(
-			backend.libecDesc, ctx.datas, ctx.codings)
+		C.my_liberasurecode_encode_cleanup(
+			backend.libecDesc, C.size_t(ctx.frags_len), ctx.datas, ctx.codings)
 	}}, nil
 }
 

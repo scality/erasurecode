@@ -438,40 +438,33 @@ func TestGC(t *testing.T) {
 	tests := []struct {
 		name     string
 		testFunc func()
-	}{
-		struct {
-			name     string
-			testFunc func()
-		}{
-			"Reconstruct",
-			func() {
-				encoded, err := backend.Encode(input)
+	}{{
+		"Reconstruct",
+		func() {
+			encoded, err := backend.Encode(input)
 
-				if err != nil {
-					t.Fatal("cannot encode data")
-					return
-				}
-				vect := encoded.Data
-				defer encoded.Free()
+			if err != nil {
+				t.Fatal("cannot encode data")
+				return
+			}
+			vect := encoded.Data
+			defer encoded.Free()
 
-				oldData := vect[0][:] // force a copy
+			oldData := vect[0][:] // force a copy
 
-				data, err := backend.Reconstruct(vect[1:3], 0)
-				if err != nil {
-					t.Fatalf("cannot reconstruct data, %s", err)
-					return
-				}
+			data, err := backend.Reconstruct(vect[1:3], 0)
+			if err != nil {
+				t.Fatalf("cannot reconstruct data, %s", err)
+				return
+			}
 
-				if len(data) != len(oldData) {
-					t.Fatal("reconstructing failed")
-					return
-				}
-			},
+			if len(data) != len(oldData) {
+				t.Fatal("reconstructing failed")
+				return
+			}
 		},
-		struct {
-			name     string
-			testFunc func()
-		}{
+	},
+		{
 			"Decode",
 			func() {
 				encoded, err := backend.Encode(input)
@@ -925,7 +918,7 @@ func TestReconstructM(t *testing.T) {
 		buf[i] = byte('A' + i%26)
 	}
 
-	// All our sub tests case. Each {X,Y} represents respecitvely the chunking unit (size of each subpart)
+	// All our sub tests case. Each {X,Y} represents respectively the chunking unit (size of each subpart)
 	// and the fragment number we want to have to reconstruct
 	testParams := []struct {
 		chunkUnit  int
@@ -962,8 +955,7 @@ func TestReconstructM(t *testing.T) {
 				return
 			}
 			if ddata == nil {
-				t.Errorf("unexpected error / fragment rebuilt is nil")
-				return
+				t.Fatal("unexpected error / fragment rebuilt is nil")
 			}
 
 			res := bytes.Compare(ddata.Data, result.Data[p.fragNumber])
