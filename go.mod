@@ -1,4 +1,4 @@
-module github.com/benoit-a/erasurecode
+module github.com/scality/erasurecode
 
 go 1.13
 
