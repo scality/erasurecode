@@ -41,8 +41,11 @@ models:
       name: "Building liberasurecode"
       command: |
         set -xvue
-        git clone --depth 1 --branch afc38de https://github.com/scality/liberasurecode.git
+        export SHA1=afc38de0498bf8ca7f5ef994431a2e85549b008e
+        git clone --depth 1 https://github.com/scality/liberasurecode.git
         cd liberasurecode
+        git fetch origin ${SHA1}
+        git checkout ${SHA1}
         ./autogen.sh
         ./configure --prefix=/usr --with-pkgconfigdir=/usr/lib64/pkgconfig
         make
