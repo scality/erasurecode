@@ -38,13 +38,13 @@ $(ISALSRC)/autogen.sh:
 	git clone https://github.com/01org/isa-l.git $(ISALSRC)
 
 $(LIBECSRC)/autogen.sh:
-	git clone https://github.com/openstack/liberasurecode.git $(LIBECSRC)
+	git clone https://github.com/scality/liberasurecode.git $(LIBECSRC)
 
 $(JERASURESRC)/configure.ac:
-	git clone http://lab.jerasure.org/jerasure/jerasure.git $(JERASURESRC)
+	git clone https://github.com/ceph/jerasure.git $(JERASURESRC)
 
 $(GFCOMPLETESRC)/autogen.sh:
-	git clone http://lab.jerasure.org/jerasure/gf-complete.git $(GFCOMPLETESRC)
+	git clone https://github.com/ceph/gf-complete.git $(GFCOMPLETESRC)
 
 $(PWD)/deps/%/configure: $(PWD)/deps/%/autogen.sh
 	cd $(@D) && ./autogen.sh
