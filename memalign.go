@@ -24,5 +24,6 @@ func memalign(n int, align int) ([]byte, error) {
 		// Success
 		return buf[:n], nil
 	}
+	offSet = align - offSet
 	return buf[offSet : offSet+n], nil
 }
