@@ -25,33 +25,6 @@ models:
       source: artifacts
       timeout: 3600
       alwaysRun: true
-  - ShellCommand: &build_isal
-      name: "Building ISAL"
-      command: |
-        set -xvue
-        git clone --depth 1 --branch v2.28.0 https://github.com/intel/isa-l.git
-        cd isa-l
-        ./autogen.sh
-        ./configure --prefix=/usr
-        make
-        sudo make install
-        sudo ldconfig
-      timeout: 300  # 5 minutes
-  - ShellCommand: &build_liberasurecode
-      name: "Building liberasurecode"
-      command: |
-        set -xvue
-        export SHA1=afc38de0498bf8ca7f5ef994431a2e85549b008e
-        git clone --depth 1 https://github.com/scality/liberasurecode.git
-        cd liberasurecode
-        git fetch origin ${SHA1}
-        git checkout ${SHA1}
-        ./autogen.sh
-        ./configure --prefix=/usr --with-pkgconfigdir=/usr/lib64/pkgconfig
-        make
-        sudo make install
-        sudo ldconfig
-      timeout: 300  # 5 minutes
   - ShellCommand: &get_deps
       name: "get dependencies"
       command: |
@@ -62,15 +35,15 @@ models:
       name: "test & lint"
       command: |
         set -xvue
-        go test -v .
-        golangci-lint run --new-from-rev 983e1d15
+        make test
+        make lint
       haltOnFailure: true
       timeout: 300  # 5 minutes
   - ShellCommand: &build
       name: "build"
       command: |
         set -xvue
-        go build -v .
+        make
       haltOnFailure: true
       timeout: 300  # 5 minutes
 
@@ -126,8 +99,6 @@ stages:
           value: centos7
           hideStepIf: true
       - Git: *git_pull_docker
-      - ShellCommand: *build_isal
-      - ShellCommand: *build_liberasurecode
       - ShellCommand: *get_deps
-      - ShellCommand: *test
       - ShellCommand: *build
+      - ShellCommand: *test
