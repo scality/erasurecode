@@ -1,12 +1,15 @@
-FROM centos:7.7.1908
+FROM centos:8
 
 ENV HOME_BUILDBOT /var/lib/buildbot
 
 # Enable EPEL
-RUN yum install -y epel-release
+RUN dnf install -y epel-release dnf-plugins-core
+
+# Enable PowerTools
+RUN dnf config-manager --set-enabled PowerTools
 
 # Mix of dependency of buildbot & build.
-RUN yum install -y \
+RUN dnf install -y \
         autoconf \
         automake \
         file \
@@ -22,12 +25,13 @@ RUN yum install -y \
 
 # Installation of golang
 ARG GO_VERSION=1.15.1
+
 RUN curl -s https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz | \
        tar -C /usr/local -xzf - && \
     ln -snf /usr/local/go/bin/go /usr/bin
 
 # Linter
-ARG GOLINT_VERSION=1.23.8
+ARG GOLINT_VERSION=1.21.0
 RUN wget -q -O - https://github.com/golangci/golangci-lint/releases/download/v${GOLINT_VERSION}/golangci-lint-${GOLINT_VERSION}-linux-amd64.tar.gz | \
     tar xvz -C /usr/bin --strip-components=1 -f -
 
@@ -54,7 +58,7 @@ ENV BUILD_DISTRO=centos7
 
 # Run buildbot-worker on startup
 ARG BUILDBOT_VERSION=0.9.12
-RUN sudo pip install buildbot-worker==$BUILDBOT_VERSION
+RUN sudo pip2 install buildbot-worker==$BUILDBOT_VERSION
 
 WORKDIR /home/eve/workspace
 CMD buildbot-worker create-worker . "$BUILDMASTER:$BUILDMASTER_PORT" "$WORKERNAME" "$WORKERPASS" \
