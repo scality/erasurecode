@@ -58,9 +58,9 @@ stages:
       #
       - ShellCommand:
           name: add successful .final_status to artifacts
-          command: >
+          command: |
             mkdir -p build_status
-            && echo -n "SUCCESSFUL" > build_status/.final_status
+            echo -n "SUCCESSFUL" > build_status/.final_status
           haltOnFailure: true
       - ShellCommand:
           name: add failed .final_status to artifacts if needed

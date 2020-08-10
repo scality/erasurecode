@@ -1,4 +1,4 @@
-FROM centos:8
+FROM centos:8.2.2004
 
 ENV HOME_BUILDBOT /var/lib/buildbot
 
@@ -15,6 +15,7 @@ RUN dnf install -y \
         file \
         gcc \
         git \
+        glibc-all-langpacks \
         libtool \
         make \
         python2-pip \
