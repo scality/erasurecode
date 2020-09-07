@@ -21,7 +21,7 @@ RUN yum install -y \
         zlib-devel
 
 # Installation of golang
-ARG GO_VERSION=1.14.2
+ARG GO_VERSION=1.15.1
 RUN curl -s https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz | \
        tar -C /usr/local -xzf - && \
     ln -snf /usr/local/go/bin/go /usr/bin
