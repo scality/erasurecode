@@ -1,0 +1,44 @@
+name: "Install the repository dependecies"
+runs:
+  using: "composite"
+  steps:
+    - run: echo "keepcache=1" >> /etc/dnf/dnf.conf
+      shell: bash
+    - name: Cache deps
+      uses: actions/cache@v2
+      with:
+        path: /var/cache/dnf
+        key: centos-dnf
+    - name: install dnf packages
+      run: |
+        dnf install -y epel-release dnf-plugins-core
+        dnf config-manager --set-enabled PowerTools
+        dnf install -y autoconf automake file gcc glibc-all-langpacks \
+          libtool make wget yasm zlib-devel git sudo
+      shell: bash
+
+
+    - run: mkdir -p /tmp/golang
+      shell: bash
+    - name: Cache golang deps
+      id: cache-go-deps
+      uses: actions/cache@v2
+      with:
+        path: /tmp/golang
+        key: centos-golang
+    - name: Downoad file if there is no cache
+      run: |
+        if echo ${{ steps.cache-go-deps.outputs.cache-hit }} | grep -c "true"
+        then
+          echo "Cache hit - skipping dependency installation"
+        else
+          curl -s https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz > /tmp/golang/go${GO_VERSION}.linux-amd64.tar.gz
+          wget -q -O - https://github.com/golangci/golangci-lint/releases/download/v${GOLINT_VERSION}/golangci-lint-${GOLINT_VERSION}-linux-amd64.tar.gz > /tmp/golang/golangci-lint-${GOLINT_VERSION}-linux-amd64.tar.gz
+        fi
+      shell: bash
+
+    - name: Install go denpendcies
+      run: |
+        cat /tmp/golang/go${GO_VERSION}.linux-amd64.tar.gz | tar -C /usr/local -xzf - && ln -snf /usr/local/go/bin/go /usr/bin
+        cat /tmp/golang/golangci-lint-${GOLINT_VERSION}-linux-amd64.tar.gz | tar xvz -C /usr/bin --strip-components=1 -f -
+      shell: bash
