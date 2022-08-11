@@ -4,10 +4,10 @@ linters:
     - bodyclose
     - deadcode
     - goconst
-    - golint
     - gosec
     - misspell
     - prealloc
+    - revive
     - staticcheck
     - unparam
     - unused

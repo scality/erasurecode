@@ -14,13 +14,16 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    container: centos:8.2.2004
+    container: rockylinux:9.0.20220720
     env:
-      GOLINT_VERSION: 1.21.0
-      GO_VERSION: 1.15.1
+      GOLINT_VERSION: 1.48.0
+      GO_VERSION: 1.19
     steps:
+      - run: dnf install -y git
       - name: Checkout
         uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
       - uses: ./.github/workflows/installation
       - name: install depss
         run: |

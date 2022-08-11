@@ -12,12 +12,10 @@ runs:
     - name: install dnf packages
       run: |
         dnf install -y epel-release dnf-plugins-core
-        dnf config-manager --set-enabled PowerTools
+        dnf config-manager --set-enabled crb
         dnf install -y autoconf automake file gcc glibc-all-langpacks \
           libtool make wget yasm zlib-devel git sudo
       shell: bash
-
-
     - run: mkdir -p /tmp/golang
       shell: bash
     - name: Cache golang deps
