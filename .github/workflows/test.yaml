@@ -14,7 +14,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    container: centos:8.2.2004
+    container: centos:8.4.2105
     env:
       GOLINT_VERSION: 1.21.0
       GO_VERSION: 1.15.1
