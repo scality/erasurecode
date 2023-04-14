@@ -5,7 +5,7 @@ runs:
     - run: echo "keepcache=1" >> /etc/dnf/dnf.conf
       shell: bash
     - name: Cache deps
-      uses: actions/cache@v2
+      uses: actions/cache@v3
       with:
         path: /var/cache/dnf
         key: centos-dnf
@@ -22,7 +22,7 @@ runs:
       shell: bash
     - name: Cache golang deps
       id: cache-go-deps
-      uses: actions/cache@v2
+      uses: actions/cache@v3
       with:
         path: /tmp/golang
         key: centos-golang
