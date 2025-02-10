@@ -141,7 +141,7 @@ void encode_chunk_prepare(int desc,
     char *data,
     int datalen,
     int piecesize,
-	struct encode_chunk_context *ctx)
+    struct encode_chunk_context *ctx)
 {
     ctx->instance = liberasurecode_backend_instance_get_by_desc(desc);
     int i;
@@ -1160,33 +1160,31 @@ func (backend *Backend) Reconstruct(frags [][]byte, fragIndex int) ([]byte, erro
 }
 
 // ReconstructMatrix is a really not optimized yet reconstruction of a frag containing subchunking
-func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, chunksize int) (*DecodeData, error) {
+func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, pieceSize int) (*DecodeData, error) {
 	var wg sync.WaitGroup
 	if len(frags) == 0 {
 		return nil, errors.New("reconstruction requires at least one fragment")
 	}
 
 	fragLen := len(frags[0])
-	blockSize := chunksize + backend.headerSize
-	blockNr := fragLen / blockSize
-	if blockNr*blockSize != fragLen {
-		blockNr++
+	chunkSize := pieceSize + backend.headerSize
+	chunkNr := fragLen / chunkSize
+	if chunkNr*chunkSize != fragLen {
+		chunkNr++
 	}
-	dlen := blockNr * blockSize
+	dlen := chunkNr * chunkSize
 	dataB, data := backend.pool.New(dlen)
-
-	cellSize := chunksize + backend.headerSize
 
 	var errCounter uint32
 	// TODO use goroutines here to leverage multicore computation
-	wg.Add(blockNr)
-	for i := 0; i < blockNr; i++ {
-		go func(blocknr int) {
+	wg.Add(chunkNr)
+	for i := 0; i < chunkNr; i++ {
+		go func(chunkIdx int) {
 			vect := make([][]byte, len(frags))
 			for j := 0; j < len(frags); j++ {
-				vect[j] = frags[j][blocknr*cellSize : (blocknr+1)*cellSize]
+				vect[j] = frags[j][chunkIdx*chunkSize : (chunkIdx+1)*chunkSize]
 			}
-			if err := backend.reconstruct(vect, fragIndex, data[blocknr*blockSize:]); err != nil {
+			if err := backend.reconstruct(vect, fragIndex, data[chunkIdx*chunkSize:]); err != nil {
 				atomic.AddUint32(&errCounter, 1)
 			}
 			wg.Done()
