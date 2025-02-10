@@ -961,48 +961,129 @@ func (backend *Backend) DecodeMatrix(frags []ValidatedFragment, pieceSize int) (
 		totLen += int64(len(subdata.Data))
 		subdata.Free()
 	}
+
 	return &DecodeData{data[:totLen:totLen], func() {
 		backend.pool.Release(dataB)
 	}}, nil
 }
 
-// RangeMatrix describes informations needed to decode a range of encoded frags
+// RangeMatrix describes information needed to decode a range of encoded frags
 type RangeMatrix struct {
-	FragRangeStart    int // Start offset in each K+M fragments
-	FragRangeEnd      int // End offset in each K+M fragments
-	DecodedRangeStart int // Start offset in decoded data
-	DecodedRangeEnd   int // end offset in decoded data
+	ReqStartIncl int
+	ReqEndIncl   int
+
+	/* The fragments that the range spans.  */
+	FragFirstIncl int
+	FragCount     int
+
+	/* The range in each fragment to be queried satisfy the requested range. */
+	InFragRangeStartIncl int
+	InFragRangeEndExcl   int
+
+	/* The requested range relative to the decoded buffer. */
+	LinearizedRangeStartIncl int
+	DecodedRangeStartIncl    int
 }
 
-// GetRangeMatrix returns the bounds of each data fragments to get to satisfy
-// {start, end} range
-func (backend *Backend) GetRangeMatrix(start, end, chunksize, fragSize int) *RangeMatrix {
-	blockSize := chunksize
-	groupSize := blockSize * backend.K
+/*
+ * Returns the ranges to read a matrix encoded data. This function tries
+ * to minimize the number of request to perform depending on the requested
+ * range.
+ *
+ * There are a few design choices that make the result not always obvious.
+ * 		1. Each fragment range is always identical.
+ *      2. When the requested range wraps around fragments all fragments
+ *         are always queried.
+ *
+ * (1) is currently necessary to avoid querying multiple time the same
+ * fragment in case of failures (to reconstruct the data). This prefer
+ * performing the minimum amount of IO requests, instead of reading the minimum
+ * amount of data. We could lift this constraint if the caller would stream
+ * group at a time but that would require the backend to have matching
+ * alignement constraints.
+ *
+ * (2) could also be lifted. This is currently done to avoid changing the way
+ * the current decoding is performed. To work, it currently requires consecutive
+ * fragments. We then can't leave gaps in fragments. For example if
+ * we take a erasure code with 4 data fragments of 4 chunks,
+ * with the requested range represented by a '*' and the resulting fragment
+ * ranges by '[]':
+ *
+ *     p1 [-[- *]-]    The request here start at the end of the 2nd chunk in p4
+ *        [-[- *]-]    then wraps around in the subsequent chunks in p1 and p2.
+ *     .. [-[- -]-]
+ *     p4 [-[* -]-]    When this occurs, we will still query, p4 just to decode
+ *                     the relevant requested range. The decoded buffer
+ *                     will look like [p1 p2 p3 p4(*) p1(*) p2(*) p3 p4].
+ *                     Chunks not marked with a '*' are discarded. Note how
+ *                     the heading and trailing is unecessary and could be
+ *                     discarded in the ideal case.
+ *
+ * Perfect cases occur when the request span a single group (column):
+ *
+ *     p1 [- - - -]
+ * 		  [-[*]- -]
+ *     .. [-[*]- -]
+ *     p4 [-[*]- -]
+ *
+ */
+func (backend *Backend) GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize int) *RangeMatrix {
+	chunkSize := pieceSize + backend.headerSize
+	groupSize := pieceSize * backend.K
 
-	// check that range can be satisfied
-	nrChunkByFrag := fragSize / (backend.headerSize + chunksize)
-	trueFragLen := nrChunkByFrag * chunksize
-	linearizedDataLen := trueFragLen * backend.K
-
-	if start > linearizedDataLen || end > linearizedDataLen || start > end {
+	/* At this point we don't know what is the true payload size, but we
+	   can at least check that it doesn't exceed the maximum payload that
+	   this configuration can handle. */
+	nrChunkByFrag := fragSize / chunkSize
+	dataLenPerFrag := fragSize - nrChunkByFrag*backend.headerSize
+	maxDataLen := dataLenPerFrag * backend.K
+	if startIncl >= maxDataLen || endIncl >= maxDataLen || startIncl > endIncl {
 		return nil
 	}
 
-	// start's block number
-	rStart := start / groupSize
-	rEnd := end / groupSize
+	pieceStartIncl := startIncl / pieceSize
+	pieceEndIncl := endIncl / pieceSize
 
-	// convert block number to offset
-	fragStart := rStart * (chunksize + backend.headerSize)
-	fragEnd := (rEnd + 1) * (chunksize + backend.headerSize)
-	linearizedStart := rStart * backend.K * chunksize
+	groupStartIncl := pieceStartIncl / backend.K
+	groupEndIncl := pieceEndIncl / backend.K
+
+	fragFirstIncl := pieceStartIncl % backend.K
+	fragCount := (pieceEndIncl + 1 - pieceStartIncl)
+	dataOffset := pieceStartIncl * pieceSize
+
+	/* When wrapping around, we read the full groups. */
+	if fragFirstIncl+fragCount > backend.K {
+		fragFirstIncl = 0
+		fragCount = backend.K
+		dataOffset = groupStartIncl * groupSize
+	}
+
+	/* For each fragment, this is the minimum range to read -- including
+	   the header -- to decode or repair the data. */
+	inFragRangeStartIncl := groupStartIncl * chunkSize
+	inFragRangeEndExcl := (groupEndIncl + 1) * chunkSize
+
+	/* The output buffer only contains the data necessary to read the range,
+	   and the requested range must be adjusted to be relative
+	   to the output buffer which starts at 0.
+
+	   Special care is needed whe the requested range wraps in the
+	   fragments. In that case we degenerate to querying all groups of
+	   all fragments (see (2) in the function's comment above). */
+	linearizedRangeStartIncl := startIncl - dataOffset
+
+	/* Decoding always works on a group boundary. */
+	decodedRangeStartIncl := startIncl - groupStartIncl*groupSize
 
 	return &RangeMatrix{
-		FragRangeStart:    fragStart,
-		FragRangeEnd:      fragEnd,
-		DecodedRangeStart: start - linearizedStart,
-		DecodedRangeEnd:   end - linearizedStart,
+		ReqStartIncl:             startIncl,
+		ReqEndIncl:               endIncl,
+		FragFirstIncl:            fragFirstIncl,
+		FragCount:                fragCount,
+		InFragRangeStartIncl:     inFragRangeStartIncl,
+		InFragRangeEndExcl:       inFragRangeEndExcl,
+		DecodedRangeStartIncl:    decodedRangeStartIncl,
+		LinearizedRangeStartIncl: linearizedRangeStartIncl,
 	}
 }
 
