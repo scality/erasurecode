@@ -2,11 +2,14 @@ package erasurecode
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"testing/quick"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -559,7 +562,7 @@ var decodeTests = []decodeTest{
 	{maxBuffer * 2, Params{Name: "isa_l_rs_vand", K: 2, M: 1, MaxBlockSize: maxBuffer / 2}},
 }
 
-func BenchmarkDecodeM(b *testing.B) {
+func BenchmarkLinearizeM(b *testing.B) {
 	for _, test := range decodeTests {
 		b.Run(test.String(), func(b *testing.B) {
 			backend, err := InitBackend(test.p)
@@ -578,7 +581,7 @@ func BenchmarkDecodeM(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				decoded, err := backend.DecodeMatrix(encoded.Data, DefaultChunkSize)
+				decoded, err := backend.LinearizeMatrix(encoded.Data, DefaultChunkSize)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -594,7 +597,7 @@ func BenchmarkDecodeM(b *testing.B) {
 	}
 }
 
-func BenchmarkDecodeMissingM(b *testing.B) {
+func BenchmarkDecodeM(b *testing.B) {
 	for _, test := range decodeTests {
 		b.Run(test.String(), func(b *testing.B) {
 			backend, err := InitBackend(test.p)
@@ -687,34 +690,6 @@ func BenchmarkReconstructM(b *testing.B) {
 	}
 }
 
-func BenchmarkDecodeMSlow(b *testing.B) {
-	for _, test := range decodeTests {
-		b.Run(test.String(), func(b *testing.B) {
-			backend, err := InitBackend(test.p)
-			if err != nil {
-				b.Fatal("cannot create backend", err)
-			}
-
-			buf := bytes.Repeat([]byte("A"), test.size)
-			encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
-
-			if err != nil {
-				b.Fatal(err)
-			}
-			defer encoded.Free()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-
-				decoded, err := backend.decodeMatrixSlow(encoded.Data, DefaultChunkSize)
-				if err != nil {
-					b.Fatal(err)
-				}
-				decoded.Free()
-			}
-		})
-	}
-}
-
 func BenchmarkMatrix(b *testing.B) {
 	for _, dtest := range decodeTests {
 		blockSize := 32768
@@ -741,9 +716,10 @@ func BenchmarkMatrix(b *testing.B) {
 							b.Run("Decode", func(b *testing.B) {
 								encoded, _ := backend.EncodeMatrix(buf, blockSize)
 								defer encoded.Free()
+
 								b.ResetTimer()
 								for i := 0; i < b.N; i++ {
-									decoded, err := backend.DecodeMatrix(encoded.Data, blockSize)
+									decoded, err := backend.LinearizeMatrix(encoded.Data, blockSize)
 									if err != nil {
 										b.Fatal(err)
 									}
@@ -796,9 +772,7 @@ func TestEncodeM(t *testing.T) {
 	}
 
 	buf := make([]byte, 1024*1024)
-	for i := 0; i < len(buf); i++ {
-		buf[i] = byte('A' + i%26)
-	}
+	cryptorand.Read(buf)
 
 	testParams := []struct {
 		chunkUnit   int
@@ -821,14 +795,12 @@ func TestEncodeM(t *testing.T) {
 				t.Errorf("failed to encode %+v", err)
 			}
 
-			// Do the matrix decoding. It should work fastly because we have
-			// all data fragments. After, we check that our linearized buffer
-			// contains expected data
-			ddata, err := backend.DecodeMatrix(result.Data, p.chunkUnit)
+			// Check that our linearized buffer
+			// contains expected data when there is all data fragment.
+			ddata, err := backend.LinearizeMatrix(result.Data, p.chunkUnit)
 			assert.NoError(t, err)
-			if ok := checkData(ddata.Data); ok == false {
-				t.Errorf("bad matrix decoding")
-			}
+			assert.Equal(t, len(buf), len(ddata.Data), "data mismatch")
+			assert.Equalf(t, buf, ddata.Data, "data mismatch")
 
 			ddata.Free()
 
@@ -840,20 +812,9 @@ func TestEncodeM(t *testing.T) {
 			vect = append(vect, result.Data[4])
 			vect = append(vect, result.Data[5])
 
-			ddata2, _ := backend.decodeMatrixSlow(vect, p.chunkUnit)
-			if ok := checkData(ddata2.Data); ok == false {
-				t.Errorf("bad matrix repairing")
-			}
+			ddata2, _ := backend.DecodeMatrix(vect, p.chunkUnit)
+			assert.Equal(t, buf, ddata2.Data, "data mismatch")
 			ddata2.Free()
-
-			/*
-			 * now we will do the same but we should failed because the chunksize provided
-			 * to decode the data is not the same used by encode function
-			 */
-			_, err = backend.decodeMatrixSlow(result.Data, p.chunkUnit+1)
-			if err == nil {
-				t.Errorf("no error during decoding whereas bad params were provided")
-			}
 
 			result.Free()
 		})
@@ -861,48 +822,216 @@ func TestEncodeM(t *testing.T) {
 	backend.Close()
 }
 
-// checkData reads a buffer and check that we have a round robin sequence of [A-Z] characters
-func checkData(data []byte) bool {
-	for i := 0; i < len(data)-1; i++ {
-		if data[i] != 'Z' {
-			if data[i] != data[i+1]-1 {
-				return false
-			}
-		} else if data[i+1] != 'A' {
-			return false
-		}
-	}
-	return true
-}
+func TestLinearizeMatrix(t *testing.T) {
+	assert := assert.New(t)
 
-func TestMatrixBounds(t *testing.T) {
-	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 2, M: 1, W: 8, HD: 5})
+	pieceSize := DefaultChunkSize
+	k := 4
+	m := 1
 
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: k, M: m, W: 8, HD: m})
 	if err != nil {
 		t.Fatalf("cannot init backend: (%v)", err)
 	}
 
-	testParams := []struct {
-		rangeStart    int
-		rangeEnd      int
-		chunkUnit     int
-		expectedStart int
-		expectedEnd   int
-	}{
-		{rangeStart: 1023999, rangeEnd: 1048575, chunkUnit: DefaultChunkSize, expectedStart: 492720, expectedEnd: 525568},
+	rangeValues := func(values []reflect.Value, rng *rand.Rand) {
+		dataSize := 1 + rng.Intn(7*1024*1024)
+
+		/* To avoid generating too many unintersting samples, this tests
+		   focuses on valid inputs. */
+		startIncl := rng.Intn(dataSize - 1)
+		endIncl := rng.Intn(dataSize - 1)
+		if endIncl < startIncl {
+			tmp := startIncl
+			startIncl = endIncl
+			endIncl = tmp
+		}
+
+		values[0] = reflect.ValueOf(startIncl)
+		values[1] = reflect.ValueOf(endIncl)
+		values[2] = reflect.ValueOf(dataSize)
 	}
 
-	for _, param := range testParams {
-		p := param
-		testName := fmt.Sprintf("TestEMatrixBounds-%d-%d", p.rangeStart, p.rangeEnd)
-		t.Run(testName, func(t *testing.T) {
-			rmatrix := backend.GetRangeMatrix(p.rangeStart, p.rangeEnd, p.chunkUnit, DefaultFragSize)
+	checkRange := func(startIncl, endIncl, dataSize int) bool {
+		t.Logf("TestLinearizeMatrix check %d-%d-%d", startIncl, endIncl, dataSize)
 
-			if rmatrix.FragRangeStart != p.expectedStart || rmatrix.FragRangeEnd != p.expectedEnd {
-				t.Errorf("error : %+v but got %+v", p, rmatrix)
+		data := make([]byte, dataSize)
+		cryptorand.Read(data)
+
+		encoded, err := backend.EncodeMatrix(data, DefaultChunkSize)
+		if err != nil {
+			t.Fatalf("failed to encode buffer: (%v)", err)
+		}
+		defer encoded.Free()
+
+		fragSize := len(encoded.Data[0])
+		rangeM := backend.GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize)
+		assert.NotNil(rangeM)
+
+		/* Decode the matrix as if it was requested and
+		   checks that the result matches the payload on the requested range. */
+		frags := make([][]byte, 0)
+		for i := 0; i < rangeM.FragCount; i += 1 {
+			fragIdx := (rangeM.FragFirstIncl + i) % k
+			buffer := encoded.Data[fragIdx][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl]
+			frags = append(frags, buffer)
+		}
+
+		decoded, err := backend.LinearizeMatrix(frags, pieceSize)
+		assert.Nil(err)
+		defer decoded.Free()
+
+		expected := data[startIncl : endIncl+1]
+
+		linearizedRangeEndExcl := rangeM.LinearizedRangeStartIncl + (endIncl - startIncl) + 1
+		found := decoded.Data[rangeM.LinearizedRangeStartIncl:linearizedRangeEndExcl]
+		return bytes.Equal(expected, found)
+	}
+
+	config := quick.Config{
+		Values: rangeValues,
+	}
+
+	if err := quick.Check(checkRange, &config); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestDecodeMatrix(t *testing.T) {
+	assert := assert.New(t)
+
+	pieceSize := DefaultChunkSize
+	k := 4
+	m := 1
+
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: k, M: m, W: 8, HD: m})
+	if err != nil {
+		t.Fatalf("cannot init backend: (%v)", err)
+	}
+
+	rangeValues := func(values []reflect.Value, rng *rand.Rand) {
+		dataSize := 1 + rng.Intn(7*1024*1024)
+
+		startIncl := rng.Intn(dataSize - 1)
+		endIncl := rng.Intn(dataSize - 1)
+		if endIncl < startIncl {
+			tmp := startIncl
+			startIncl = endIncl
+			endIncl = tmp
+		}
+
+		failedFragIdx := rng.Intn(k + m)
+
+		values[0] = reflect.ValueOf(startIncl)
+		values[1] = reflect.ValueOf(endIncl)
+		values[2] = reflect.ValueOf(dataSize)
+		values[3] = reflect.ValueOf(failedFragIdx)
+	}
+
+	checkRange := func(startIncl, endIncl, dataSize int, failedFragIdx int) bool {
+		t.Logf("TestDecodeMatrix check %d-%d-%d-%d", startIncl, endIncl, dataSize, failedFragIdx)
+
+		data := make([]byte, dataSize)
+		cryptorand.Read(data)
+
+		encoded, err := backend.EncodeMatrix(data, DefaultChunkSize)
+		if err != nil {
+			t.Fatalf("failed to encode buffer: (%v)", err)
+		}
+		defer encoded.Free()
+
+		fragSize := len(encoded.Data[0])
+		rangeM := backend.GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize)
+		assert.NotNil(rangeM)
+
+		/* Decode the matrix as if it was requested and
+		   checks that the result matches the payload on the requested range. */
+		frags := make([][]byte, 0)
+		for i := 0; i < (k + m); i += 1 {
+			fragIdx := i
+			if fragIdx == failedFragIdx {
+				continue
 			}
 
-		})
+			buffer := encoded.Data[fragIdx][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl]
+			frags = append(frags, buffer)
+		}
+
+		decoded, err := backend.DecodeMatrix(frags, pieceSize)
+		assert.Nil(err)
+		defer decoded.Free()
+
+		expected := data[startIncl : endIncl+1]
+
+		decodedRangeEndExcl := rangeM.DecodedRangeStartIncl + (endIncl - startIncl) + 1
+		found := decoded.Data[rangeM.DecodedRangeStartIncl:decodedRangeEndExcl]
+		return bytes.Equal(expected, found)
+	}
+
+	config := quick.Config{
+		Values: rangeValues,
+	}
+
+	if err := quick.Check(checkRange, &config); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestValidateFragmentMatrix(t *testing.T) {
+	assert := assert.New(t)
+
+	pieceSize := DefaultChunkSize
+	k := 4
+	m := 1
+
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: k, M: m, W: 8, HD: m})
+	if err != nil {
+		t.Fatalf("cannot init backend: (%v)", err)
+	}
+
+	dataSize := 7 * 1024 * 1024
+	data := make([]byte, dataSize)
+	cryptorand.Read(data)
+
+	encoded, err := backend.EncodeMatrix(data, DefaultChunkSize)
+	if err != nil {
+		t.Fatalf("failed to encode buffer: (%v)", err)
+	}
+	defer encoded.Free()
+
+	fragSize := len(encoded.Data[0])
+	for i := 0; i < len(encoded.Data); i += 1 {
+		rangeMatrix := backend.GetRangeMatrix(0, dataSize-1, pieceSize, fragSize)
+		assert.NotNil(rangeMatrix)
+
+		frag := encoded.Data[i][rangeMatrix.InFragRangeStartIncl:rangeMatrix.InFragRangeEndExcl]
+		valid := backend.ValidateFragmentMatrix(frag, pieceSize)
+		assert.True(valid)
+
+		chunkSize := pieceSize + backend.headerSize
+		offset := 0
+		for offset < len(frag) {
+			for altered := 0; altered < backend.headerSize; altered += 1 {
+				t.Logf("frag %d altered offset %d altered %d", i, offset, altered)
+				previous := frag[offset+altered]
+				frag[offset+altered] = previous + 1
+
+				valid := backend.ValidateFragmentMatrix(frag, pieceSize)
+
+				/* libec_version and padding not checked */
+				if altered >= 63 && altered < 67 {
+					assert.True(valid)
+				} else if altered >= 71 {
+					assert.True(valid)
+				} else {
+					assert.False(valid)
+				}
+
+				frag[offset+altered] = previous
+			}
+
+			offset += chunkSize
+		}
 	}
 }
 

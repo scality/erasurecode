@@ -18,64 +18,53 @@ ec_backend_id_t getBackendID(struct fragment_header_s *header) { return header->
 uint32_t getECVersion(struct fragment_header_s *header) { return header->libec_version; }
 int getHeaderSize() { return sizeof(struct fragment_header_s); }
 
-// decode_fast is used when we have all data fragment. Instead of doing a true decoding, we just
+// linearize is used when we have all data fragment. Instead of doing a true decoding, we just
 // reassemble all the fragment linearized in a buffer. This is mainly a copy of liberasurecode
 // fragment_to_string function, except that we won't do any addionnal allocation
-// 'k' is the number of expected data fragment
-// 'in' is an array of all frags
+//
+// /!\ This function does not perform any header checksum validation.
+// If fragments must be validated checks 'check_matrix_fragment'
+//
+// 'k' the number of data fragment used for the encoding.
+// 'in' is an array of all data frags, in their index order.
 // 'inlen' is the array size
 // 'dest' is an already allocated buffer where data will be linearized
 // 'destlen' is the buffer size, and hence, the maximum number of bytes linearized
 // 'outlen' is a pointer containing the number of bytes really linearized in dest (always lower or equal to destlen)
 // it returns dest if nothing went wrong, else null
-char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uint64_t *outlen) {
+char* linearize(int k, char **in, int inlen, char *dest, uint64_t destlen, uint64_t *outlen) {
     int i;
     int curr_idx = 0;
     int orig_data_size = -1;
-    char *frags[k];
-    // cannot decode fastly
-    if (inlen < k) {
-        return NULL;
-    }
+
     if (dest == NULL || outlen == NULL) {
         return NULL;
     }
-    memset(frags, 0, sizeof(frags));
 
-    // we start by iterating on all fragment, and ordering according to the fragment index
-    // in the header all data fragment (fragment whose index is lower than k)
-    for (i = 0; i < inlen && curr_idx != k; i++) {
-        int index;
-        int data_size;
-        if (is_invalid_fragment_header((fragment_header_t*)in[i])) {
-            continue;
-        }
-        index = get_fragment_idx(in[i]);
-        data_size = get_fragment_payload_size(in[i]);
-        if (index < 0 || data_size < 0) {
-            continue;
-        }
+    // The following perform small correctness checks before linearizing
+    // the buffer
+    int previous_idx = -1;
+    for (i = 0; i < inlen; i++) {
+        int index = get_fragment_idx(in[i]);
+
         if (orig_data_size < 0) {
             orig_data_size = get_orig_data_size(in[i]);
         } else if(get_orig_data_size(in[i]) != orig_data_size) {
-            continue;
+            return NULL;
         }
+
         if (index >= k) {
-            continue;
+            return NULL;
         }
-        if (frags[index] == NULL) {
-            curr_idx ++;
-            frags[index] = in[i];
+
+        // Checks that the fragments are sorted.
+        if (previous_idx > index) {
+            return NULL;
         }
+        previous_idx = index;
     }
 
-    // if we don't have enough data fragment, we leave this function and will probably
-    // fallback on a true decoding function
-    if (curr_idx != k) {
-        return NULL;
-    }
-
-    // compute how number of bytes will be linearized
+    // compute the number of bytes needed for the output
     int tocopy = orig_data_size;
     int string_off = 0;
     *outlen = orig_data_size;
@@ -85,15 +74,33 @@ char* decode_fast(int k, char **in, int inlen, char *dest, uint64_t destlen, uin
     }
 
     // copy in an ordered way all bytes of fragments in the buffer
-    for (i = 0; i < k && tocopy > 0; i++) {
-        char *f = get_data_ptr_from_fragment(frags[i]);
-        int fsize = get_fragment_payload_size(frags[i]);
+    for (i = 0; i < inlen && tocopy > 0; i++) {
+        char *f = get_data_ptr_from_fragment(in[i]);
+        int fsize = get_fragment_payload_size(in[i]);
         int psize = tocopy > fsize ? fsize : tocopy;
         memcpy(dest + string_off, f, psize);
         tocopy -= psize;
         string_off += psize;
     }
     return dest;
+}
+
+bool check_matrix_fragment(char *frag, int frag_len, int piecesize) {
+    size_t offset = 0;
+
+    bool aligned = (frag_len % (piecesize + getHeaderSize())) == 0;
+    if (!aligned) {
+        return false;
+    }
+
+    while (offset < frag_len) {
+        if (is_invalid_fragment_header((fragment_header_t*)&frag[offset])) {
+            return false;
+        }
+        offset += piecesize + getHeaderSize();
+    }
+
+    return true;
 }
 
 
@@ -410,6 +417,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -800,50 +808,110 @@ type DecodeData struct {
 // 	}
 // }
 
-// DecodeMatrix decode all the subchunk of frags, and linearize data
-func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData, error) {
+type RawFragment = []byte
+type ValidatedFragment = []byte
+
+func (backend *Backend) ValidateFragmentMatrix(frag RawFragment, pieceSize int) bool {
+	result := C.check_matrix_fragment((*C.char)(unsafe.Pointer(&frag[0])), C.int(len(frag)), C.int(pieceSize))
+	if result != C.bool(true) {
+		return false
+	}
+
+	return true
+}
+
+func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int) (*DecodeData, error) {
 	var wg sync.WaitGroup
 
 	if len(frags) == 0 {
-		return nil, errors.New("decoding requires at least one fragment")
+		return nil, errors.New("linearizing requires at least one fragment")
 	}
 
-	fragLen := len(frags[0])
-	lenBlock := piecesize + backend.headerSize
-	numBlock := fragLen / lenBlock
-	if numBlock*lenBlock != fragLen {
-		numBlock++
+	fragRangeLen := len(frags[0])
+	chunkSize := pieceSize + backend.headerSize
+	nrChunks := fragRangeLen / chunkSize
+	if nrChunks*chunkSize != fragRangeLen {
+		nrChunks++
 	}
 
-	// allocate output buffer
-	dataB, data := backend.pool.New(numBlock * piecesize * backend.K)
+	/* Fragments are sorted beforehand with the index of the first chunk.
+	   All chunks of a fragments share the same index. */
+	fragsIndex := make([]int, len(frags))
+	for i := 0; i < len(frags); i += 1 {
+		fragsIndex[i] = i
+	}
 
+	sort.Slice(fragsIndex, func(i, j int) bool {
+		lhs := frags[fragsIndex[i]]
+		rhs := frags[fragsIndex[j]]
+
+		var lhsIdx, rhsIdx C.int
+		lhsIdx = C.get_fragment_idx((*C.char)(unsafe.Pointer(&lhs[0])))
+		rhsIdx = C.get_fragment_idx((*C.char)(unsafe.Pointer(&rhs[0])))
+
+		return lhsIdx < rhsIdx
+	})
+
+	/* There is no reconstruction that can happen.
+	   All coding fragments must be ignored */
+	lastDataFragIdxExcl := 0
+	previousFragIdx := -1
+	for lastDataFragIdxExcl < len(fragsIndex) {
+		frag := frags[fragsIndex[lastDataFragIdxExcl]]
+		idx := int(C.get_fragment_idx((*C.char)(unsafe.Pointer(&frag[0]))))
+
+		if idx < 0 {
+			return nil, errors.New("invalid fragment index")
+		}
+
+		if idx >= backend.K {
+			break
+		}
+
+		if len(frags[0]) != fragRangeLen {
+			return nil, errors.New("invalid fragment len")
+		}
+
+		if previousFragIdx > 0 && (idx-previousFragIdx) != 1 {
+			/* Fragments are not contiguous. This functions doesn't supports
+			   gaps. */
+			return nil, errors.New("gaps in the provided fragments")
+		}
+
+		lastDataFragIdxExcl += 1
+		previousFragIdx = idx
+	}
+	fragsIndex = fragsIndex[:lastDataFragIdxExcl]
+
+	dataB, data := backend.pool.New(nrChunks * pieceSize * len(fragsIndex))
 	errorNb := uint32(0)
 	totLen := uint64(0)
-	wg.Add(numBlock)
+	wg.Add(nrChunks)
 
-	for i := 0; i < numBlock; i++ {
+	for i := 0; i < nrChunks; i++ {
 		// launch goroutines, providing them a subrange of the final buffer so it can be used
 		// in concurrency without need to lock it access
-		go func(blockNr int) {
-			cFrags := C.makeStrArray(C.int(len(frags)))
+		func(chunkIdx int) {
+			cDataFrags := C.makeStrArray(C.int(len(fragsIndex)))
 			// prepare the C array of pointer, respecting the offset in each fragments
-			for index, frags := range frags {
-				cSetArrayItem(cFrags, index, (*C.char)(unsafe.Pointer(&frags[blockNr*lenBlock])))
+
+			for i, idx := range fragsIndex {
+				frag := frags[idx]
+				cSetArrayItem(cDataFrags, i, (*C.char)(unsafe.Pointer(&frag[chunkIdx*chunkSize])))
 			}
 			// try to decode fastly (if we have all data fragments), providing the good offset of the
 			// linearized buffer, according the block number we are decoding
 			var outlen C.uint64_t
-			p := C.decode_fast(C.int(backend.K), cFrags, C.int(len(frags)),
-				(*C.char)(unsafe.Pointer(&data[blockNr*piecesize*backend.K])),
-				C.uint64_t(piecesize*backend.K), &outlen)
+			p := C.linearize(C.int(backend.K), cDataFrags, C.int(len(fragsIndex)),
+				(*C.char)(unsafe.Pointer(&data[chunkIdx*pieceSize*len(fragsIndex)])),
+				C.uint64_t(pieceSize*backend.K), &outlen)
 
 			if p == nil {
 				atomic.AddUint32(&errorNb, 1)
 			} else {
 				atomic.AddUint64(&totLen, uint64(outlen))
 			}
-			C.freeStrArray(cFrags)
+			C.freeStrArray(cDataFrags)
 			wg.Done()
 		}(i)
 	}
@@ -853,38 +921,37 @@ func (backend *Backend) DecodeMatrix(frags [][]byte, piecesize int) (*DecodeData
 	if errorNb != 0 {
 		// Release the previous buffer
 		backend.pool.Release(dataB)
-		return backend.decodeMatrixSlow(frags, piecesize)
+		return nil, errors.New("failed to linearize fragments")
 	}
 
-	// return our linearized data. Closure expect to free the C allocated data once
-	// the DecodeData.Data will not be used anymore
-	return &DecodeData{data[:totLen:totLen],
-			func() {
-				backend.pool.Release(dataB)
-			}},
-		nil
-
+	return &DecodeData{
+		data[:totLen:totLen],
+		func() {
+			backend.pool.Release(dataB)
+		}}, nil
 }
 
-// decodeMatrixSlow is a fallback when something went wrong with decodeMatrix (especially when data part is missing)
-func (backend *Backend) decodeMatrixSlow(frags [][]byte, piecesize int) (*DecodeData, error) {
-	fragLen := len(frags[0])
-	blockSize := piecesize + backend.headerSize
-	blockNr := fragLen / blockSize
-	if blockNr*blockSize != fragLen {
-		blockNr++
+// DecodeMatrix tries to reconstruct the data fragments and returns the linearized data.
+func (backend *Backend) DecodeMatrix(frags []ValidatedFragment, pieceSize int) (*DecodeData, error) {
+	fragRangeLen := len(frags[0])
+	chunkSize := pieceSize + backend.headerSize
+	chunkNr := fragRangeLen / chunkSize
+	if chunkNr*chunkSize != fragRangeLen {
+		chunkNr++
 	}
 
-	dataB, data := backend.pool.New(blockNr * piecesize * backend.K)
-
-	cellSize := piecesize + backend.headerSize
+	dataB, data := backend.pool.New(chunkNr * pieceSize * backend.K)
 
 	var totLen int64
 
-	for i := 0; i < blockNr; i++ {
+	for i := 0; i < chunkNr; i++ {
 		vect := make([][]byte, len(frags))
 		for j := 0; j < len(frags); j++ {
-			vect[j] = frags[j][i*cellSize : (i+1)*cellSize]
+			if len(frags[j]) != fragRangeLen {
+				return nil, errors.New("invalid fragment len")
+			}
+
+			vect[j] = frags[j][i*chunkSize : (i+1)*chunkSize]
 		}
 		subdata, err := backend.Decode(vect)
 		if err != nil {
