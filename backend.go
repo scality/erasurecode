@@ -991,7 +991,7 @@ type RangeMatrix struct {
  * range.
  *
  * There are a few design choices that make the result not always obvious.
- * 		1. Each fragment range is always identical.
+ *      1. Each fragment range is always identical.
  *      2. When the requested range wraps around fragments all fragments
  *         are always queried.
  *
@@ -1022,7 +1022,7 @@ type RangeMatrix struct {
  * Perfect cases occur when the request span a single group (column):
  *
  *     p1 [- - - -]
- * 		  [-[*]- -]
+ *        [-[*]- -]
  *     .. [-[*]- -]
  *     p4 [-[*]- -]
  *
