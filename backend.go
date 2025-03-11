@@ -820,6 +820,24 @@ func (backend *Backend) ValidateFragmentMatrix(frag RawFragment, pieceSize int) 
 	return true
 }
 
+type ChunkInfo struct {
+	ChunkSize int
+	NrChunk   int
+}
+
+func (backend *Backend) ChunkInfo(fragRangeLen int, pieceSize int) ChunkInfo {
+	chunkSize := pieceSize + backend.headerSize
+	nrChunks := fragRangeLen / chunkSize
+	if nrChunks*chunkSize != fragRangeLen {
+		nrChunks++
+	}
+
+	return ChunkInfo{
+		ChunkSize: chunkSize,
+		NrChunk:   nrChunks,
+	}
+}
+
 func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int) (*DecodeData, error) {
 	var wg sync.WaitGroup
 
@@ -828,11 +846,7 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 	}
 
 	fragRangeLen := len(frags[0])
-	chunkSize := pieceSize + backend.headerSize
-	nrChunks := fragRangeLen / chunkSize
-	if nrChunks*chunkSize != fragRangeLen {
-		nrChunks++
-	}
+	chunkInfo := backend.ChunkInfo(fragRangeLen, pieceSize)
 
 	/* Fragments are sorted beforehand with the index of the first chunk.
 	   All chunks of a fragments share the same index. */
@@ -883,12 +897,12 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 	}
 	fragsIndex = fragsIndex[:lastDataFragIdxExcl]
 
-	dataB, data := backend.pool.New(nrChunks * pieceSize * len(fragsIndex))
+	dataB, data := backend.pool.New(chunkInfo.NrChunk * pieceSize * len(fragsIndex))
 	errorNb := uint32(0)
 	totLen := uint64(0)
-	wg.Add(nrChunks)
+	wg.Add(chunkInfo.NrChunk)
 
-	for i := 0; i < nrChunks; i++ {
+	for i := 0; i < chunkInfo.NrChunk; i++ {
 		// launch goroutines, providing them a subrange of the final buffer so it can be used
 		// in concurrency without need to lock it access
 		go func(chunkIdx int) {
@@ -897,7 +911,7 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 
 			for i, idx := range fragsIndex {
 				frag := frags[idx]
-				cSetArrayItem(cDataFrags, i, (*C.char)(unsafe.Pointer(&frag[chunkIdx*chunkSize])))
+				cSetArrayItem(cDataFrags, i, (*C.char)(unsafe.Pointer(&frag[chunkIdx*chunkInfo.ChunkSize])))
 			}
 			// try to decode fastly (if we have all data fragments), providing the good offset of the
 			// linearized buffer, according the block number we are decoding
@@ -933,25 +947,25 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 
 // DecodeMatrix tries to reconstruct the data fragments and returns the linearized data.
 func (backend *Backend) DecodeMatrix(frags []ValidatedFragment, pieceSize int) (*DecodeData, error) {
-	fragRangeLen := len(frags[0])
-	chunkSize := pieceSize + backend.headerSize
-	chunkNr := fragRangeLen / chunkSize
-	if chunkNr*chunkSize != fragRangeLen {
-		chunkNr++
+	if len(frags) == 0 {
+		return nil, errors.New("Decoding requires at least one fragment")
 	}
 
-	dataB, data := backend.pool.New(chunkNr * pieceSize * backend.K)
+	fragRangeLen := len(frags[0])
+	chunkInfo := backend.ChunkInfo(fragRangeLen, pieceSize)
+
+	dataB, data := backend.pool.New(chunkInfo.NrChunk * pieceSize * backend.K)
 
 	var totLen int64
 
-	for i := 0; i < chunkNr; i++ {
+	for i := 0; i < chunkInfo.NrChunk; i++ {
 		vect := make([][]byte, len(frags))
 		for j := 0; j < len(frags); j++ {
 			if len(frags[j]) != fragRangeLen {
 				return nil, errors.New("invalid fragment len")
 			}
 
-			vect[j] = frags[j][i*chunkSize : (i+1)*chunkSize]
+			vect[j] = frags[j][i*chunkInfo.ChunkSize : (i+1)*chunkInfo.ChunkSize]
 		}
 		subdata, err := backend.Decode(vect)
 		if err != nil {
