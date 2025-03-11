@@ -1181,3 +1181,64 @@ func TestEncodeDecodeMatrix(t *testing.T) {
 		}
 	}
 }
+
+func TestRangeMatrix(t *testing.T) {
+	// These are basic tests on the rangeMatrix. More complete tests on the
+	// actual values are performed by the random tests:
+	// TestDecodeMatrix and TestLinearizeMatrix.
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
+	if err != nil {
+		t.Fatalf("cannot init backend: (%v)", err)
+	}
+
+	pieceSize := DefaultChunkSize
+	fragSize := DefaultFragSize
+
+	/* Invalid ranges */
+	rangeM := backend.GetRangeMatrix(0, -1, pieceSize, fragSize)
+	assert.Nil(t, rangeM)
+
+	rangeM = backend.GetRangeMatrix(0, 10*fragSize, pieceSize, fragSize)
+	assert.Nil(t, rangeM)
+
+	/* Range is aligned on groups. */
+	startIncl := 0
+	endIncl := 0
+	rangeM = backend.GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize)
+	rangeM = backend.GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize)
+	assert.Equal(t, rangeM.FragCount, 1)
+	assert.Equal(t, rangeM.FragFirstIncl, 0)
+	assert.Equal(t, rangeM.ReqStartIncl, startIncl)
+	assert.Equal(t, rangeM.ReqEndIncl, endIncl)
+	assert.Equal(t, rangeM.ReqEndIncl, endIncl)
+
+	expectedTotalRead := (backend.headerSize + pieceSize)
+	totalRead := rangeM.FragCount * (rangeM.InFragRangeEndExcl - rangeM.InFragRangeStartIncl)
+	assert.Equal(t, expectedTotalRead, totalRead)
+
+	/* Range spanning a single group */
+	startIncl = 0
+	endIncl = backend.K*pieceSize - 1
+	rangeM = backend.GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize)
+	assert.Equal(t, rangeM.FragCount, backend.K)
+	assert.Equal(t, rangeM.FragFirstIncl, 0)
+	assert.Equal(t, rangeM.ReqStartIncl, startIncl)
+	assert.Equal(t, rangeM.ReqEndIncl, endIncl)
+
+	expectedTotalRead = backend.K * (backend.headerSize + pieceSize)
+	totalRead = rangeM.FragCount * (rangeM.InFragRangeEndExcl - rangeM.InFragRangeStartIncl)
+	assert.Equal(t, expectedTotalRead, totalRead)
+
+	/* Range spanning multiple groups, this fallback to read two full groups. */
+	startIncl = (backend.K - 1) * pieceSize
+	endIncl = backend.K * pieceSize
+	rangeM = backend.GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize)
+	assert.Equal(t, rangeM.FragFirstIncl, 0)
+	assert.Equal(t, rangeM.FragCount, 4)
+	assert.Equal(t, rangeM.ReqStartIncl, startIncl)
+	assert.Equal(t, rangeM.ReqEndIncl, endIncl)
+
+	expectedTotalRead = 2 * backend.K * (backend.headerSize + pieceSize)
+	totalRead = rangeM.FragCount * (rangeM.InFragRangeEndExcl - rangeM.InFragRangeStartIncl)
+	assert.Equal(t, expectedTotalRead, totalRead)
+}
