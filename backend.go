@@ -891,7 +891,7 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 	for i := 0; i < nrChunks; i++ {
 		// launch goroutines, providing them a subrange of the final buffer so it can be used
 		// in concurrency without need to lock it access
-		func(chunkIdx int) {
+		go func(chunkIdx int) {
 			cDataFrags := C.makeStrArray(C.int(len(fragsIndex)))
 			// prepare the C array of pointer, respecting the offset in each fragments
 
