@@ -1243,17 +1243,17 @@ type FragmentInfo struct {
 
 // GetFragmentInfo is the wrapper of the C implementation
 func GetFragmentInfo(frag []byte) FragmentInfo {
-	header := *(*C.struct_fragment_header_s)(unsafe.Pointer(&frag[0]))
-	backendID := C.getBackendID(&header)
+	header := (*C.struct_fragment_header_s)(unsafe.Pointer(&frag[0]))
+	backendID := C.getBackendID(header)
 	return FragmentInfo{
 		Index:               int(header.meta.idx),
 		Size:                int(header.meta.size),
 		BackendMetadataSize: int(header.meta.frag_backend_metadata_size),
-		OrigDataSize:        uint64(C.getOrigDataSize(&header)),
+		OrigDataSize:        uint64(C.getOrigDataSize(header)),
 		BackendID:           backendID,
 		BackendName:         idToName(backendID),
-		BackendVersion:      makeVersion(C.getBackendVersion(&header)),
-		ErasureCodeVersion:  makeVersion(C.getECVersion(&header)),
-		IsValid:             C.is_invalid_fragment_header((*C.fragment_header_t)(&header)) == 0,
+		BackendVersion:      makeVersion(C.getBackendVersion(header)),
+		ErasureCodeVersion:  makeVersion(C.getECVersion(header)),
+		IsValid:             C.is_invalid_fragment_header((*C.fragment_header_t)(header)) == 0,
 	}
 }
