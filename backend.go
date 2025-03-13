@@ -925,11 +925,19 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 			} else {
 				atomic.AddUint64(&totLen, uint64(outlen))
 			}
+
 			C.freeStrArray(cDataFrags)
 			wg.Done()
 		}(i)
 	}
 	wg.Wait()
+
+	/* Tasks above which call into C.linearize keep a pointer of each
+	   fragment to perform their computation. When all goroutines are in the
+	   ffi call, there is no outstanding reference to frags. This ensure
+	   that this array (and each frag that it references) do not get GC until
+	   all tasks completed. */
+	runtime.KeepAlive(frags)
 
 	// if we got some issues, fallback on "slow" decoding
 	if errorNb != 0 {
