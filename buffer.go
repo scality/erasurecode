@@ -35,9 +35,9 @@ func (b BufferMatrix) maxLen() int {
 // NewBufferMatrix returns a new buffer suitable for <len> data and organized
 // such as it can be injected into EncodeMatrixWithBuffer without allocation/copying
 // the data into shards
-func NewBufferMatrix(bufSize int, len int, k int) *BufferMatrix {
+func NewBufferMatrix(bufSize int, l int, k int) *BufferMatrix {
 	var b BufferMatrix
-	b.Reset(bufSize, len, k)
+	b.Reset(bufSize, l, k)
 	return &b
 }
 
@@ -122,24 +122,24 @@ func (b *BufferMatrix) Write(p []byte) (int, error) {
 	for len(p) > 0 {
 		curOffset, leftToCopy := b.getOffset()
 
-		var max int
+		var m int
 
 		if len(p) > leftToCopy {
-			max = leftToCopy
+			m = leftToCopy
 		} else {
-			max = len(p)
+			m = len(p)
 		}
 
-		n := copy(b.b[curOffset:], p[:max])
+		n := copy(b.b[curOffset:], p[:m])
 
 		b.leftInBlock -= n
-		dataCopied += max
+		dataCopied += m
 		if b.leftInBlock == 0 {
 			b.curBlock++
 			b.leftInBlock--
 		}
 
-		p = p[max:]
+		p = p[m:]
 	}
 	return dataCopied, nil
 }
@@ -148,9 +148,9 @@ func (b *BufferMatrix) ReadFrom(r io.Reader) (int64, error) {
 	read := int64(0)
 
 	for {
-		curOffset, max := b.getOffset()
+		curOffset, m := b.getOffset()
 
-		n, err := r.Read(b.b[curOffset : curOffset+max])
+		n, err := r.Read(b.b[curOffset : curOffset+m])
 		if err != nil && err != io.EOF {
 			return 0, err
 		}

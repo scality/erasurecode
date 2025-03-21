@@ -43,7 +43,7 @@ func copyNAtATime(output io.Writer, input io.Reader, n int) (written uint64, err
 		nr, er := io.ReadFull(input, buf)
 		if nr > 0 {
 			nw, ew := output.Write(buf[:n])
-			written += uint64(nw)
+			written += uint64(nw) //nolint:gosec
 			if ew != nil {
 				err = ew
 				return
