@@ -37,7 +37,7 @@ runs:
         fi
       shell: bash
 
-    - name: Install go denpendcies
+    - name: Install go dependencies
       run: |
         cat /tmp/golang/go${GO_VERSION}.linux-amd64.tar.gz | tar -C /usr/local -xzf - && ln -snf /usr/local/go/bin/go /usr/bin
         cat /tmp/golang/golangci-lint-${GOLINT_VERSION}-linux-amd64.tar.gz | tar xvz -C /usr/bin --strip-components=1 -f -
