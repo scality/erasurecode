@@ -5,14 +5,14 @@ runs:
     - run: echo "keepcache=1" >> /etc/dnf/dnf.conf
       shell: bash
     - name: Cache deps
-      uses: actions/cache@v2
+      uses: actions/cache@v3
       with:
         path: /var/cache/dnf
         key: centos-dnf
     - name: install dnf packages
       run: |
         dnf install -y epel-release dnf-plugins-core
-        dnf config-manager --set-enabled PowerTools
+        /usr/bin/crb enable
         dnf install -y autoconf automake file gcc glibc-all-langpacks \
           libtool make wget yasm zlib-devel git sudo
       shell: bash
@@ -22,7 +22,7 @@ runs:
       shell: bash
     - name: Cache golang deps
       id: cache-go-deps
-      uses: actions/cache@v2
+      uses: actions/cache@v3
       with:
         path: /tmp/golang
         key: centos-golang
