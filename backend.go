@@ -963,17 +963,19 @@ func (backend *Backend) DecodeMatrix(frags []ValidatedFragment, pieceSize int) (
 
 	dataB, data := backend.pool.New(chunkInfo.NrChunk * pieceSize * backend.K)
 
-	var totLen int64
+	for i := range frags {
+		if len(frags[i]) != fragRangeLen {
+			return nil, errors.New("invalid fragment len")
+		}
+	}
 
+	var totLen int64
 	for i := 0; i < chunkInfo.NrChunk; i++ {
 		vect := make([][]byte, len(frags))
-		for j := 0; j < len(frags); j++ {
-			if len(frags[j]) != fragRangeLen {
-				return nil, errors.New("invalid fragment len")
-			}
-
+		for j := range frags {
 			vect[j] = frags[j][i*chunkInfo.ChunkSize : (i+1)*chunkInfo.ChunkSize]
 		}
+
 		subdata, err := backend.Decode(vect)
 		if err != nil {
 			return nil, fmt.Errorf("error subdecoding %d cause =%v", i, err)
