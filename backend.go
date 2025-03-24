@@ -1016,7 +1016,7 @@ type RangeMatrix struct {
  *      2. When the requested range wraps around fragments all fragments
  *         are always queried.
  *
- * (1) is currently necessary to avoid querying multiple time the same
+ * (1) is currently necessary to avoid querying multiple times the same
  * fragment in case of failures (to reconstruct the data). This prefer
  * performing the minimum amount of IO requests, instead of reading the minimum
  * amount of data. We could lift this constraint if the caller would stream
