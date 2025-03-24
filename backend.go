@@ -939,7 +939,6 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 	   all tasks completed. */
 	runtime.KeepAlive(frags)
 
-	// if we got some issues, fallback on "slow" decoding
 	if errorNb != 0 {
 		// Release the previous buffer
 		backend.pool.Release(dataB)
