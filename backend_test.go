@@ -2,13 +2,16 @@ package erasurecode
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var validParams = []Params{
@@ -1051,4 +1054,125 @@ func TestEncodeDecodeMatrix(t *testing.T) {
 			t.Errorf("Error closing backend %v: %q", backend, err)
 		}
 	}
+}
+
+// TestFormatOldNew tests the compatibility of the new format with the old one
+// It uses the buffer matrix to encode the data in the old/new format and
+// then decodes it using the backend. It checks that the data is the same
+// and that the format is correct.
+func TestFormatOldNew(t *testing.T) {
+	testCases := []struct {
+		useNewFormat bool
+		k, n         int
+	}{
+		{true, 2, 1},
+		{true, 5, 1},
+		{false, 2, 1},
+		{false, 5, 1},
+	}
+	for _, testCase := range testCases {
+		t.Run(fmt.Sprintf("%v-%d-%d", testCase.useNewFormat, testCase.k, testCase.n), func(t *testing.T) {
+			// use buffermatrix to storage format in new format and see if we can decode it
+			backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: testCase.k, M: testCase.n})
+			require.NoError(t, err)
+			defer backend.Close()
+			buf := bytes.Repeat([]byte("A"), 1024*1024+rand.Intn(1024*1024)) //nolint:gosec
+
+			bm := NewBufferMatrix(32768, len(buf), backend.K)
+			if testCase.useNewFormat {
+				bm.UseNewFormat()
+			}
+			_, err = io.Copy(bm, bytes.NewReader(buf))
+			require.NoError(t, err)
+			bm.Finish()
+
+			require.Equal(t, len(buf), bm.Length())
+
+			e, err := backend.EncodeMatrixWithBufferMatrix(bm, 32768)
+			require.NoError(t, err)
+			defer e.Free()
+
+			// check the format / first 80 is the header, lets check it
+			for i := range len(e.Data) {
+				hdr := e.Data[i][0:80]
+
+				var f fragheader
+				err = f.UnmarshalBinary(hdr)
+				require.NoError(t, err)
+				require.Equal(t, 32768, int(f.meta.size))
+				require.Equal(t, 32768*testCase.k, int(f.meta.origDataSize))
+			}
+			// case 1; fast decode
+			ddata, err := backend.DecodeMatrix(e.Data, 32768)
+			require.NoError(t, err)
+			require.Equal(t, buf, ddata.Data)
+			defer ddata.Free()
+			// case 2: missing data
+			rdata, err := backend.ReconstructMatrix(e.Data[1:], 0, 32768)
+			require.NoError(t, err)
+			require.Equal(t, e.Data[0], rdata.Data)
+			defer rdata.Free()
+			// case 3: slow decode
+			ddata2, err := backend.DecodeMatrix(e.Data[1:], 32768)
+			require.NoError(t, err)
+			require.Equal(t, buf, ddata2.Data)
+			defer ddata2.Free()
+			// case 4: rebuild missing coding
+			require.Equal(t, testCase.k, len(e.Data[:testCase.k]))
+			rdata2, err := backend.ReconstructMatrix(e.Data[:testCase.k], testCase.k, 32768)
+			require.NoError(t, err)
+			require.Equal(t, e.Data[testCase.k], rdata2.Data)
+		})
+	}
+}
+
+// duplicate fragment_header_t from libec
+type fragheader struct {
+	meta           fragmeta
+	magic          uint32
+	libecVersion   uint32
+	metadataChksum uint32
+	padding        [9]byte
+}
+
+func (f *fragheader) UnmarshalBinary(data []byte) error {
+	if len(data) != 80 {
+		return fmt.Errorf("invalid size for fragment header: %d", len(data))
+	}
+	if err := f.meta.UnmarshalBinary(data[0:63]); err != nil {
+		return err
+	}
+	f.magic = binary.BigEndian.Uint32(data[63:67])
+	f.libecVersion = binary.BigEndian.Uint32(data[67:71])
+	f.metadataChksum = binary.BigEndian.Uint32(data[71:75])
+	copy(f.padding[:], data[75:80])
+	return nil
+}
+
+func (f *fragmeta) UnmarshalBinary(data []byte) error {
+	if len(data) != 63 {
+		return fmt.Errorf("invalid size for fragment metadata: %d", len(data))
+	}
+	f.idx = binary.BigEndian.Uint32(data[0:4])
+	f.size = binary.LittleEndian.Uint32(data[4:8])
+	f.fragBackendMetadataSize = binary.LittleEndian.Uint32(data[8:12])
+	f.origDataSize = binary.LittleEndian.Uint64(data[12:20])
+	f.checksumType = data[20]
+	copy(f.checksum[:], data[21:53])
+	f.checksumMismatch = data[53]
+	f.backendId = data[54]
+	f.backendVersion = binary.BigEndian.Uint32(data[55:59])
+	return nil
+}
+
+type fragmeta struct {
+	idx                     uint32
+	size                    uint32
+	fragBackendMetadataSize uint32
+	origDataSize            uint64
+	checksumType            uint8
+	checksum                [32]byte
+	checksumMismatch        uint8
+	backendId               uint8
+	backendVersion          uint32
 }
