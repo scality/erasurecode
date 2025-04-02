@@ -1100,7 +1100,7 @@ func TestFormatOldNew(t *testing.T) {
 				err = f.UnmarshalBinary(hdr)
 				require.NoError(t, err)
 				require.Equal(t, 32768, int(f.meta.size))
-				require.Equal(t, 32768*testCase.k, int(f.meta.origDataSize))
+				require.Equal(t, 32768*testCase.k, int(f.meta.origDataSize)) //nolint:gosec
 			}
 			// case 1; fast decode
 			ddata, err := backend.DecodeMatrix(e.Data, 32768)
@@ -1160,7 +1160,7 @@ func (f *fragmeta) UnmarshalBinary(data []byte) error {
 	f.checksumType = data[20]
 	copy(f.checksum[:], data[21:53])
 	f.checksumMismatch = data[53]
-	f.backendId = data[54]
+	f.backendID = data[54]
 	f.backendVersion = binary.BigEndian.Uint32(data[55:59])
 	return nil
 }
@@ -1173,7 +1173,7 @@ type fragmeta struct {
 	checksumType            uint8
 	checksum                [32]byte
 	checksumMismatch        uint8
-	backendId               uint8
+	backendID               uint8
 	backendVersion          uint32
 }
 
