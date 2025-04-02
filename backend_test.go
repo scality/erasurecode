@@ -1176,3 +1176,188 @@ type fragmeta struct {
 	backendId               uint8
 	backendVersion          uint32
 }
+
+func TestGetRangeMatrix(t *testing.T) {
+	type testCase struct {
+		name              string
+		start             int
+		end               int
+		chunksize         int
+		fragSize          int
+		payloadSize       int
+		expectedFragStart int
+		expectedFragEnd   int
+		expectedDecStart  int
+		expectedDecEnd    int
+	}
+
+	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 2, M: 1})
+	defer backend.Close()
+
+	testCases := []testCase{
+		{
+			name:              "First 128 bytes, 100k payload",
+			start:             0,
+			end:               128,
+			chunksize:         32768,
+			fragSize:          1048576,
+			payloadSize:       100000,
+			expectedFragStart: 0,
+			expectedFragEnd:   32768 + backend.headerSize,
+			expectedDecStart:  0,
+			expectedDecEnd:    128,
+		},
+		{
+			name:              "First 128 bytes, 1MB payload",
+			start:             0,
+			end:               128,
+			chunksize:         32768,
+			fragSize:          1048576,
+			payloadSize:       1000000,
+			expectedFragStart: 0,
+			expectedFragEnd:   32768 + backend.headerSize,
+			expectedDecStart:  0,
+			expectedDecEnd:    128,
+		},
+		{
+			name:              "64k Block in the middle, 100k payload",
+			start:             32768,
+			end:               32768 + 65536,
+			chunksize:         32768,
+			fragSize:          1048576,
+			payloadSize:       100000,
+			expectedFragStart: 0,
+			expectedFragEnd:   65536 + 2*backend.headerSize,
+			expectedDecStart:  32768,
+			expectedDecEnd:    65536 + 32768,
+		},
+		{
+			name:              "64k Block in the middle, 1MB payload",
+			start:             500000,
+			end:               500000 + 65536,
+			chunksize:         32768,
+			fragSize:          1048576,
+			payloadSize:       1000000,
+			expectedFragStart: 7 * (32768 + 80),
+			expectedFragEnd:   7*(32768+80) + 65536 + backend.headerSize*2,
+			expectedDecStart:  500000 - 458752,
+			expectedDecEnd:    500000 - 458752 + 65536,
+		},
+		{
+			name:              "Last 80 bytes, 100k payload",
+			start:             100000 - 80,
+			end:               100000,
+			chunksize:         32768,
+			fragSize:          1048576,
+			payloadSize:       100000,
+			expectedFragStart: 32768 + 80,
+			expectedFragEnd:   32768 + 80 + 80 + 32768,
+			expectedDecStart:  100000 - 65536 - 80,
+			expectedDecEnd:    100000 - 65536,
+		},
+		{
+			name:              "Last 80 bytes, 1MB payload",
+			start:             1000000 - 80,
+			end:               1000000,
+			chunksize:         32768,
+			fragSize:          1048576,
+			payloadSize:       1000000,
+			expectedFragStart: (1000000 / 32768 / 2) * (32768 + 80),
+			expectedFragEnd:   (1000000/32768/2)*(32768+80) + 32768 + backend.headerSize,
+			expectedDecStart:  1000000 - ((1000000 / 32768) * 32768) - 80,
+			expectedDecEnd:    1000000 - ((1000000 / 32768) * 32768),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rm := backend.GetRangeMatrix(tc.start, tc.end, tc.chunksize, tc.fragSize)
+			require.NotNil(t, rm, "GetRangeMatrix returned nil")
+			assert.Equal(t, tc.expectedFragStart, rm.FragRangeStart, "FragRangeStart mismatch")
+			assert.Equal(t, tc.expectedFragEnd, rm.FragRangeEnd, "FragRangeEnd mismatch")
+			assert.Equal(t, tc.expectedDecStart, rm.DecodedRangeStart, "DecodedRangeStart mismatch")
+			assert.Equal(t, tc.expectedDecEnd, rm.DecodedRangeEnd, "DecodedRangeEnd mismatch")
+		})
+	}
+}
+
+func TestRange(t *testing.T) {
+	testCases := []struct {
+		name         string
+		useNewFormat bool
+	}{
+		{"OldFormat", false},
+		{"NewFormat", true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			testRangeHelper(t, testCase.useNewFormat)
+		})
+	}
+}
+
+func testRangeHelper(t *testing.T, useNewFormat bool) {
+	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 2, M: 1})
+	defer backend.Close()
+
+	chunkSize := 32768
+	size := 1020300
+
+	rm := backend.GetRangeMatrix(10, 20, chunkSize, size)
+	require.NotNil(t, rm, "GetRangeMatrix returned nil")
+
+	buf := make([]byte, size)
+	for i := range buf {
+		buf[i] = byte('A' + i%26)
+	}
+
+	bm := NewBufferMatrix(chunkSize, len(buf), backend.K)
+	if useNewFormat {
+		bm.UseNewFormat()
+	}
+	// bm.UseNewFormat()
+	_, err := io.Copy(bm, bytes.NewReader(buf))
+	require.NoError(t, err)
+	bm.Finish()
+	encodedData, err := backend.EncodeMatrixWithBufferMatrix(bm, chunkSize)
+	require.NoError(t, err)
+	defer encodedData.Free()
+	stripes := make([][]byte, backend.K+backend.M)
+	for i := range backend.K + backend.M {
+		stripes[i] = encodedData.Data[i]
+		stripes[i] = stripes[i][rm.FragRangeStart:rm.FragRangeEnd]
+	}
+
+	// Test decode
+	decodedData, err := backend.DecodeMatrix(stripes, chunkSize)
+	require.NoError(t, err)
+	defer decodedData.Free()
+	assert.Equal(t, buf[10:20], decodedData.Data[rm.DecodedRangeStart:rm.DecodedRangeEnd], "Decoded data mismatch")
+
+	// Test repair
+	decodedData2, err := backend.DecodeMatrix(stripes[1:], chunkSize)
+	require.NoError(t, err)
+	defer decodedData2.Free()
+	assert.Equal(t, buf[10:20], decodedData2.Data[rm.DecodedRangeStart:rm.DecodedRangeEnd], "Decoded data mismatch")
+
+	// Test last 80 bytes
+	rm = backend.GetRangeMatrix(size-80, size, chunkSize, size)
+	require.NotNil(t, rm, "GetRangeMatrix returned nil")
+
+	for i := range backend.K + backend.M {
+		stripes[i] = encodedData.Data[i]
+		stripes[i] = stripes[i][rm.FragRangeStart:rm.FragRangeEnd]
+	}
+
+	// Test decode
+	decodedData3, err := backend.DecodeMatrix(stripes, chunkSize)
+	require.NoError(t, err)
+	defer decodedData3.Free()
+	assert.Equal(t, buf[size-80:size], decodedData3.Data[rm.DecodedRangeStart:rm.DecodedRangeEnd], "Decoded data mismatch")
+	// Test repair
+	decodedData4, err := backend.DecodeMatrix(stripes[1:], chunkSize)
+	require.NoError(t, err)
+	defer decodedData4.Free()
+	assert.Equal(t, buf[size-80:size], decodedData4.Data[rm.DecodedRangeStart:rm.DecodedRangeEnd], "Decoded data mismatch")
+}

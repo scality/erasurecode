@@ -929,6 +929,7 @@ func (backend *Backend) GetRangeMatrix(start, end, chunksize, fragSize int) *Ran
 	linearizedDataLen := trueFragLen * backend.K
 
 	if start > linearizedDataLen || end > linearizedDataLen || start > end {
+		//fmt.Fprintf(os.Stderr, "start %d end %d linearizedDataLen %d\n", start, end, linearizedDataLen)
 		return nil
 	}
 
