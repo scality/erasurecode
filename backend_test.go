@@ -298,10 +298,10 @@ func TestIsInvalidFragment(t *testing.T) {
 				copy(fragCopy, frag)
 
 				// corrupt the frag
-				corruptedByte := rand.Intn(len(frag))
+				corruptedByte := rand.Intn(len(frag)) //nolint:gosec
 				for 71 <= corruptedByte && corruptedByte < 80 {
 					// in the alignment padding -- try again
-					corruptedByte = rand.Intn(len(frag))
+					corruptedByte = rand.Intn(len(frag)) //nolint:gosec
 				}
 				frag[corruptedByte] ^= 0xff
 				if !backend.IsInvalidFragment(frag) {
@@ -497,7 +497,7 @@ func TestGC(t *testing.T) {
 	nbRoutines := 500
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+		t.Run(test.name, func(_ *testing.T) {
 			var wg sync.WaitGroup
 			wg.Add(nbRoutines)
 
