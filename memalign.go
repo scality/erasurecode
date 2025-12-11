@@ -6,6 +6,7 @@ import (
 )
 
 func getAlignDifference(b []byte, align int) int {
+	// nolint:gosec
 	return int(uintptr(unsafe.Pointer(&b[0])) & uintptr(align-1))
 }
 

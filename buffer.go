@@ -6,14 +6,17 @@ import (
 )
 
 type BufferMatrix struct {
-	b                []byte
-	zero             []byte
-	hdrSize, bufSize int
-	len              int // len of input
-	k                int
-	curBlock         int
-	leftInBlock      int
-	finished         bool
+	b                  []byte
+	zero               []byte
+	hdrSize, bufSize   int
+	len                int // len of input
+	k                  int
+	curBlock           int
+	leftInBlock        int
+	finished           bool
+	sizeOfLastSubGroup int
+	// getOffset          func() (int, int)
+	newStyle bool
 }
 
 // FragLen returns the size of a "fragment" aligned to a block size (data + header)
@@ -35,9 +38,9 @@ func (b BufferMatrix) maxLen() int {
 // NewBufferMatrix returns a new buffer suitable for <len> data and organized
 // such as it can be injected into EncodeMatrixWithBuffer without allocation/copying
 // the data into shards
-func NewBufferMatrix(bufSize int, l int, k int) *BufferMatrix {
+func NewBufferMatrix(bufSize int, length int, k int) *BufferMatrix {
 	var b BufferMatrix
-	b.Reset(bufSize, l, k)
+	b.Reset(bufSize, length, k)
 	return &b
 }
 
@@ -53,6 +56,8 @@ func (b *BufferMatrix) Reset(bufSize int, length int, k int) {
 	b.curBlock = 0
 	b.finished = false
 
+	b.sizeOfLastSubGroup = b.FragLenLastSubGroup()
+
 	maxLen := b.maxLen()
 
 	if cap(b.b) < maxLen {
@@ -66,27 +71,29 @@ func (b *BufferMatrix) Reset(bufSize int, length int, k int) {
 	if len(b.zero) < bufSize {
 		b.zero = make([]byte, bufSize)
 	}
+	b.newStyle = false
+}
+
+// UseNewFormat sets the buffer to use the new format.
+// The new format is more efficient for the last stripe/subgroup.
+// Note: will panic if called after any Write() or ReadFrom()
+func (b *BufferMatrix) UseNewFormat() {
+	if b.curBlock != 0 || b.leftInBlock != -1 || b.finished {
+		panic("UseNewOffset must be called before any Write")
+	}
+	b.newStyle = true
+}
+
+// getOffset is a wrapper around getOffsetOld and getOffsetNew.
+// It will call the right one depending on the newStyle flag.
+func (b *BufferMatrix) getOffset() (int, int) {
+	if b.newStyle {
+		return b.getOffsetNew()
+	}
+	return b.getOffsetOld()
 }
 
 var emptyErasureHeader = bytes.Repeat([]byte{0}, fragmentHeaderSize())
-
-// getOffset returns current offset in buffer and size left in the current block
-// So that it is safe to copy <left> bytes at <offset>.
-// If we are at a boundary, it will init the header and skip it.
-func (b *BufferMatrix) getOffset() (int, int) {
-	realCurBlock := b.getRealBlock(b.curBlock)
-	blockSize := b.hdrSize + b.bufSize
-	blockOffset := realCurBlock * blockSize
-	if b.leftInBlock == -1 {
-		// Start of a block
-		copy(b.b[blockOffset:], emptyErasureHeader)
-		b.leftInBlock = b.bufSize
-	}
-
-	curOffset := blockOffset + (b.bufSize - b.leftInBlock) + b.hdrSize
-
-	return curOffset, b.leftInBlock
-}
 
 // Finish *must* be called after the final Write() *before* using the buffer
 // in EncodeMatrix
@@ -111,9 +118,84 @@ func (b *BufferMatrix) Finish() {
 	b.finished = true
 }
 
+// In b.b buffer, the data is organized as follow:
+// - for each block, we have a header of size hdrSize
+// - then the data of size bufSize
+// - then the next block
+// - etc.
+// The data is organized in stripes of k blocks.
+// It is meant to be split later and stored as shards.
+// Shard 0 will contain block 0, k, 2k, 3k, etc.
+// Shard 1 will contain block 1, k+1, 2k+1, 3k+1, etc.
+// etc.
+// So b.b is organized as follow:
+// [hdr][block 0][hdr][block k][hdr][block 2k][hdr][block 3k] ... [hdr][block 1][hdr][block k+1] etc...
+// When writing to buffer, we will write in the current block until it is full.
+// Then we will skip the header and write in the next block.
+// For example when block 0 is full, we will skip the header and write in block 1. When block 1 is full, we will skip the header and write in block 2, etc.
+// Them, when all blocks from 0 to k-1 are full, we will write in block k, k+1, etc.
+
+// getRealBlock returns the real block index in the buffer.
+// For example, if we have k=2 and 5 blocks in total, the buffer will be organized as follow:
+// [hdr][block 0]   [hdr][block 2]   [hdr][block 4]  [hdr][block 1]  [hdr][block 3]
+// So getRealBlock(0) will return 0, getRealBlock(1) will return 3, getRealBlock(2) will return 1, getRealBlock(3) will return 4, getRealBlock(4) will return 2.
+
+// getRealBlock returns the real block index in the buffer.
+// blockidx is the block index in the incoming data (0-indexed)
+// the return value is the block index in the buffer (0-indexed)
 func (b BufferMatrix) getRealBlock(blockidx int) int {
-	subgroup := b.SubGroups()
-	return (blockidx%b.k)*subgroup + (blockidx / b.k)
+	nbStripes := b.SubGroups()
+	return (blockidx%b.k)*nbStripes + (blockidx / b.k)
+}
+
+// getOffSetNew returns current offset in buffer and size left in the current block
+// Same a getOffset when blocks are not in the last stripe/subgroup
+// When blocks are in the last stripe/subgroup, it will split the size left in k parts
+// and return the offset and size left for the current block.
+// For example, if we have 5*blocksize bytes and k=2, the buffer will be organized as follow:
+// [hdr][block 0]  [hdr][block 2]  [hdr][block 4] / [hdr][block 1]  [hdr][block 3]  [hdr][block 5]
+// where size(block4) + size(block5) == len - (4 * blocksize) == size of last subgroup
+// when/if the size of last subgroup is not divisible by k, the block 4 may be one byte longer than block 5
+func (b *BufferMatrix) getOffsetNew() (int, int) {
+	realCurBlock := b.getRealBlock(b.curBlock)
+	blockSize := b.hdrSize + b.bufSize
+	blockOffset := realCurBlock * blockSize
+	if b.leftInBlock == -1 {
+		// Start of a block
+		copy(b.b[blockOffset:], emptyErasureHeader)
+		if b.IsBlockInLastSubGroup(b.curBlock) {
+			b.leftInBlock = b.FragLenLastSubGroup()
+		} else {
+			b.leftInBlock = b.bufSize
+		}
+	}
+
+	bufSize := b.bufSize
+	if b.IsBlockInLastSubGroup(b.curBlock) {
+		bufSize = b.FragLenLastSubGroup()
+	}
+
+	curOffset := blockOffset + (bufSize - b.leftInBlock) + b.hdrSize
+
+	return curOffset, b.leftInBlock
+}
+
+// getOffset returns current offset in buffer and size left in the current block
+// So that it is safe to copy <left> bytes at <offset>.
+// If we are at a boundary, it will init the header and skip it.
+func (b *BufferMatrix) getOffsetOld() (int, int) {
+	realCurBlock := b.getRealBlock(b.curBlock)
+	blockSize := b.hdrSize + b.bufSize
+	blockOffset := realCurBlock * blockSize
+	if b.leftInBlock == -1 {
+		// Start of a block
+		copy(b.b[blockOffset:], emptyErasureHeader)
+		b.leftInBlock = b.bufSize
+	}
+
+	curOffset := blockOffset + (b.bufSize - b.leftInBlock) + b.hdrSize
+
+	return curOffset, b.leftInBlock
 }
 
 func (b *BufferMatrix) Write(p []byte) (int, error) {
@@ -122,13 +204,7 @@ func (b *BufferMatrix) Write(p []byte) (int, error) {
 	for len(p) > 0 {
 		curOffset, leftToCopy := b.getOffset()
 
-		var m int
-
-		if len(p) > leftToCopy {
-			m = leftToCopy
-		} else {
-			m = len(p)
-		}
+		m := min(len(p), leftToCopy)
 
 		n := copy(b.b[curOffset:], p[:m])
 
@@ -176,7 +252,12 @@ func (b BufferMatrix) RealData() []byte {
 	for block := 0; len(res) < b.len; block++ {
 		blockSize := b.hdrSize + b.bufSize
 		curOffset := b.getRealBlock(block)*blockSize + b.hdrSize
-		res = append(res, b.b[curOffset:curOffset+b.bufSize]...)
+		if b.newStyle && b.IsBlockInLastSubGroup(block) {
+			amountToCopy := min(b.FragLenLastSubGroup(), b.len-len(res))
+			res = append(res, b.b[curOffset:curOffset+amountToCopy]...)
+		} else {
+			res = append(res, b.b[curOffset:curOffset+b.bufSize]...)
+		}
 	}
 
 	return res[:b.len]
@@ -188,4 +269,29 @@ func (b BufferMatrix) Bytes() []byte {
 
 func (b BufferMatrix) Length() int {
 	return b.len
+}
+
+func (b *BufferMatrix) IsBlockInLastSubGroup(block int) bool {
+	cur := block / b.k
+	return cur == b.SubGroups()-1
+}
+
+func (b *BufferMatrix) ComputeSizeOfLastSubGroup() int {
+	// total of size already in previous subgroups
+	lastSubGroup := b.SubGroups() - 1
+	totalSizeInPreviousSubGroups := lastSubGroup * b.k * (b.bufSize)
+	leftSize := b.len - totalSizeInPreviousSubGroups
+	return leftSize
+}
+
+func (b *BufferMatrix) FragLenLastSubGroup() int {
+	if !b.newStyle {
+		return b.bufSize
+	}
+
+	r := b.ComputeSizeOfLastSubGroup() / b.k
+	if b.ComputeSizeOfLastSubGroup()%b.k != 0 {
+		r++
+	}
+	return r
 }
