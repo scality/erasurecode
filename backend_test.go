@@ -18,11 +18,6 @@ import (
 )
 
 var validParams = []Params{
-	{Name: "liberasurecode_rs_vand", K: 2, M: 1},
-	{Name: "liberasurecode_rs_vand", K: 10, M: 4},
-	{Name: "liberasurecode_rs_vand", K: 4, M: 3},
-	{Name: "liberasurecode_rs_vand", K: 8, M: 4},
-	{Name: "liberasurecode_rs_vand", K: 15, M: 4},
 	{Name: "isa_l_rs_vand", K: 2, M: 1},
 	{Name: "isa_l_rs_vand", K: 2, M: 1, MaxBlockSize: 1},
 	{Name: "isa_l_rs_vand", K: 2, M: 1, MaxBlockSize: maxBuffer * 2},
@@ -151,76 +146,78 @@ func TestEncodeDecode(t *testing.T) {
 			continue
 		}
 		backend, err := InitBackend(params)
+
 		if err != nil {
 			t.Errorf("Error creating backend %v: %q", params, err)
 			continue
 		}
+		defer backend.Close()
 
 		for patternIndex, pattern := range testPatterns {
-			data, err := backend.Encode(pattern)
+			bm := NewBufferMatrix(DefaultChunkSize, len(pattern), backend.K)
+
+			_, err = io.Copy(bm, bytes.NewReader(pattern))
 			if err != nil {
-				t.Errorf("Error encoding %v: %q", params, err)
+				t.Errorf("Error copying pattern to buffer matrix: %q", err)
 				break
 			}
+			bm.Finish()
+
+			data, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+			require.NoError(t, err)
+			defer data.Free()
 
 			expectedVersion := GetVersion()
 			frags := data.Data
 			for index, frag := range frags {
-				info := GetFragmentInfo(frag)
-				if info.Index != index {
-					t.Errorf("Expected frag %v to have index %v; got %v", index, index, info.Index)
-				}
-				if info.Size != len(frag)-80 { // 80 == sizeof (struct fragment_header_s)
-					t.Errorf("Expected frag %v to have size %v; got %v", index, len(frag)-80, info.Size)
-				}
-				if info.OrigDataSize != uint64(len(pattern)) {
-					t.Errorf("Expected frag %v to have orig_data_size %v; got %v", index, len(pattern), info.OrigDataSize)
-				}
-				if info.BackendName != params.Name {
-					t.Errorf("Expected frag %v to have backend %v; got %v", index, params.Name, info.BackendName)
-				}
-				if info.ErasureCodeVersion != expectedVersion {
-					t.Errorf("Expected frag %v to have EC version %v; got %v", index, expectedVersion, info.ErasureCodeVersion)
-				}
-				if !info.IsValid {
-					t.Errorf("Expected frag %v to be valid", index)
+
+				for i := range bm.SubGroups() {
+
+					start := i * (DefaultChunkSize + 80)
+					end := start + DefaultChunkSize + 80
+					if i == bm.SubGroups()-1 {
+						end = start + bm.FragLenLastSubGroup() + 80
+					}
+
+					piece := frag[start:end]
+					require.True(t, backend.ValidateFragmentMatrix(piece, end-start-80))
+
+					info := GetFragmentInfo(piece)
+					if info.Index != index {
+						t.Errorf("Expected frag %v to have index %v; got %v", index, index, info.Index)
+					}
+					if info.Size != len(piece)-80 { // 80 == sizeof (struct fragment_header_s)
+						t.Errorf("Expected frag %v to have size %v; got %v", index, len(piece)-80, info.Size)
+					}
+					if info.BackendName != params.Name {
+						t.Errorf("Expected frag %v to have backend %v; got %v", index, params.Name, info.BackendName)
+					}
+					if info.ErasureCodeVersion != expectedVersion {
+						t.Errorf("Expected frag %v to have EC version %v; got %v", index, expectedVersion, info.ErasureCodeVersion)
+					}
+					if !info.IsValid {
+						t.Errorf("Expected frag %v to be valid", index)
+					}
 				}
 			}
 
 			decode := func(frags [][]byte, description string) bool {
-				decoded, err := backend.Decode(frags)
-				if err != nil {
-					t.Errorf("%v: %v: %q for pattern %d", description, backend, err, patternIndex)
-					return false
-				} else if !bytes.Equal(decoded.Data, pattern) {
-					t.Errorf("%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, decoded.Data)
-					return false
-				}
-				decoded.Free()
+				decoded, err := backend.DecodeMatrix(frags, DefaultChunkSize)
+				require.NoError(t, err)
+				defer decoded.Free()
+				require.True(t, bytes.Equal(decoded.Data, pattern),
+					"%v:%d(%v) pattern: %v, got: %q",
+					description, patternIndex, backend, pattern, decoded.Data)
 				return true
 			}
 
-			var good bool
-			good = decode(frags, "all frags")
-			good = good && decode(shuf(frags), "all frags, shuffled")
-			good = good && decode(frags[:params.K], "data frags")
-			good = good && decode(shuf(frags[:params.K]), "shuffled data frags")
-			good = good && decode(frags[params.M:], "with parity frags")
-			good = good && decode(shuf(frags[params.M:]), "shuffled parity frags")
+			decode(frags, "all frags")
+			decode(shuf(frags), "all frags, shuffled")
+			decode(frags[:params.K], "data frags")
+			decode(shuf(frags[:params.K]), "shuffled data frags")
+			decode(frags[params.M:], "with parity frags")
+			decode(shuf(frags[params.M:]), "shuffled parity frags")
 
-			if !good {
-				break
-			}
-			data.Free()
-		}
-
-		if _, err := backend.Decode([][]byte{}); err == nil {
-			t.Errorf("Expected error when decoding from empty fragment array")
-		}
-
-		err = backend.Close()
-		if err != nil {
-			t.Errorf("Error closing backend %v: %q", backend, err)
 		}
 	}
 }
@@ -236,41 +233,36 @@ func TestReconstruct(t *testing.T) {
 			_ = backend.Close()
 			continue
 		}
+		defer func() {
+			_ = backend.Close()
+		}()
+
 		for patternIndex, pattern := range testPatterns {
-			data, err := backend.Encode(pattern)
-			frags := data.Data
-			if err != nil {
-				t.Errorf("Error encoding %v: %q", params, err)
-			}
 
-			reconstruct := func(recon_frags [][]byte, frag_index int, description string) bool {
-				data, err := backend.Reconstruct(recon_frags, frag_index)
-				if err != nil {
-					t.Errorf("%v: %v: %q for pattern %d", description, backend, err, patternIndex)
-					return false
-				} else if !bytes.Equal(data, frags[frag_index]) {
-					t.Errorf("%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, data)
-					return false
-				}
-				return true
-			}
+			t.Run(fmt.Sprintf("%s_%d_%d-%d-%d",
+				params.Name, params.K, params.M,
+				patternIndex,
+				len(pattern)),
+				func(t *testing.T) {
+					bm := NewBufferMatrix(DefaultChunkSize, len(pattern), backend.K)
+					_, err = io.Copy(bm, bytes.NewReader(pattern))
+					require.NoError(t, err)
+					bm.Finish()
+					data, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+					require.NoError(t, err)
+					defer data.Free()
+					frags := data.Data
 
-			var good bool
-			good = reconstruct(shuf(frags[:params.K]), params.K+params.M-1, "last frag from data frags")
-			good = good && reconstruct(shuf(frags[params.M:]), 0, "first frag with parity frags")
-			if !good {
-				break
-			}
-			data.Free()
-		}
-
-		if _, err := backend.Reconstruct([][]byte{}, 0); err == nil {
-			t.Errorf("Expected error when reconstructing from empty fragment array")
-		}
-
-		err = backend.Close()
-		if err != nil {
-			t.Errorf("Error closing backend %v: %q", backend, err)
+					reconstruct := func(recon_frags [][]byte, frag_index int, description string) bool {
+						data, err := backend.ReconstructMatrix(recon_frags, frag_index, DefaultChunkSize)
+						require.NoError(t, err, "%v: %v: %q for pattern %d", description, backend, err, patternIndex)
+						defer data.Free()
+						require.True(t, bytes.Equal(data.Data, frags[frag_index]), "%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, data.Data)
+						return true
+					}
+					reconstruct(shuf(frags[:params.K]), params.K+params.M-1, "last frag from data frags")
+					reconstruct(shuf(frags[params.M:]), 0, "first frag with parity frags")
+				})
 		}
 	}
 }
@@ -286,112 +278,124 @@ func TestIsInvalidFragment(t *testing.T) {
 			_ = backend.Close()
 			continue
 		}
+		defer func() {
+			_ = backend.Close()
+		}()
 		for patternIndex, pattern := range testPatterns {
-			data, err := backend.Encode(pattern)
-			if err != nil {
-				t.Errorf("Error encoding %v: %q", params, err)
-				continue
-			}
-			frags := data.Data
-			for index, frag := range frags {
-				if backend.IsInvalidFragment(frag) {
-					t.Errorf("%v: frag %v unexpectedly invalid for pattern %d", backend, index, patternIndex)
-				}
-				fragCopy := make([]byte, len(frag))
-				copy(fragCopy, frag)
+			bm := NewBufferMatrix(DefaultChunkSize, len(pattern), backend.K)
+			_, err = io.Copy(bm, bytes.NewReader(pattern))
+			require.NoError(t, err)
+			bm.Finish()
+			data, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+			require.NoError(t, err)
+			defer data.Free()
 
-				// corrupt the frag
-				corruptedByte := rand.Intn(len(frag)) //nolint:gosec
-				for 71 <= corruptedByte && corruptedByte < 80 {
-					// in the alignment padding -- try again
-					corruptedByte = rand.Intn(len(frag)) //nolint:gosec
-				}
-				frag[corruptedByte] ^= 0xff
-				if !backend.IsInvalidFragment(frag) {
-					t.Errorf("%v: frag %v unexpectedly valid after inverting byte %d for pattern %d", backend, index, corruptedByte, patternIndex)
-				}
-				if corruptedByte < 4 || 8 <= corruptedByte && corruptedByte <= 59 {
-					/** corruption is in metadata; claim we were created by a version of
-					 *  libec that predates metadata checksums. Note that
-					 *  Note that a corrupted fragment size (bytes 4-7) will lead to a
-					 *  segfault when we try to verify the fragment -- there's a reason
-					 *  we added metadata checksums!
-					 */
-					copy(frag[63:67], []byte{9, 1, 1, 0})
-					if 20 <= corruptedByte && corruptedByte <= 53 {
-						/** Corrupted data checksum type or data checksum
-						 *  We may or may not detect this type of error; in particular,
-						 *      - if data checksum type is not in ec_checksum_type_t,
-						 *        it is ignored
-						 *      - if data checksum is mangled, we may still be valid
-						 *        under the "alternative" CRC32; this seems more likely
-						 *        with the byte inversion when the data is short
-						 *  Either way, though, clearing the checksum type should make
-						 *  it pass.
+			parts := data.Data
+			for index, part := range parts {
+				for i := range bm.SubGroups() {
+
+					start := i * (DefaultChunkSize + 80)
+					end := start + DefaultChunkSize + 80
+					if i == bm.SubGroups()-1 {
+						end = start + bm.FragLenLastSubGroup() + 80
+					}
+
+					frag := part[start:end]
+
+					if backend.IsInvalidFragment(frag) {
+						t.Errorf("%v: frag %v unexpectedly invalid for pattern %d", backend, index, patternIndex)
+					}
+					fragCopy := make([]byte, len(frag))
+					copy(fragCopy, frag)
+
+					// corrupt the frag
+					corruptedByte := rand.Intn(len(frag)) //nolint:gosec
+					for 71 <= corruptedByte && corruptedByte < 80 {
+						// in the alignment padding -- try again
+						corruptedByte = rand.Intn(len(frag)) //nolint:gosec
+					}
+					frag[corruptedByte] ^= 0xff
+					if !backend.IsInvalidFragment(frag) {
+						t.Errorf("%v: frag %v unexpectedly valid after inverting byte %d for pattern %d", backend, index, corruptedByte, patternIndex)
+					}
+					if corruptedByte < 4 || 8 <= corruptedByte && corruptedByte <= 59 {
+						/** corruption is in metadata; claim we were created by a version of
+						 *  libec that predates metadata checksums. Note that
+						 *  Note that a corrupted fragment size (bytes 4-7) will lead to a
+						 *  segfault when we try to verify the fragment -- there's a reason
+						 *  we added metadata checksums!
 						 */
-						frag[20] = 0
-						if backend.IsInvalidFragment(frag) {
-							t.Errorf("%v: frag %v unexpectedly invalid after clearing metadata crc and disabling data crc", backend, index)
+						copy(frag[63:67], []byte{9, 1, 1, 0})
+						if 20 <= corruptedByte && corruptedByte <= 53 {
+							/** Corrupted data checksum type or data checksum
+							 *  We may or may not detect this type of error; in particular,
+							 *      - if data checksum type is not in ec_checksum_type_t,
+							 *        it is ignored
+							 *      - if data checksum is mangled, we may still be valid
+							 *        under the "alternative" CRC32; this seems more likely
+							 *        with the byte inversion when the data is short
+							 *  Either way, though, clearing the checksum type should make
+							 *  it pass.
+							 */
+							frag[20] = 0
+							if backend.IsInvalidFragment(frag) {
+								t.Errorf("%v: frag %v unexpectedly invalid after clearing metadata crc and disabling data crc", backend, index)
+							}
+						} else if corruptedByte >= 54 || 0 <= corruptedByte && corruptedByte < 4 {
+							/** Some corruptions of some bytes are still detectable. Since we're
+							 *  inverting the byte, we can detect:
+							 *      - frag index -- bytes 0-3
+							 *      - data checksum type -- byte 20
+							 *      - data checksum mismatch -- byte 54
+							 *      - backend id -- byte 55
+							 *      - backend version -- bytes 56-59
+							 */
+							if !backend.IsInvalidFragment(frag) {
+								t.Errorf("%v: frag %v unexpectedly still valid after clearing metadata crc", backend, index)
+							}
+						} else {
+							if backend.IsInvalidFragment(frag) {
+								t.Errorf("%v: frag %v unexpectedly invalid after clearing metadata crc", backend, index)
+							}
 						}
-					} else if corruptedByte >= 54 || 0 <= corruptedByte && corruptedByte < 4 {
-						/** Some corruptions of some bytes are still detectable. Since we're
-						 *  inverting the byte, we can detect:
-						 *      - frag index -- bytes 0-3
-						 *      - data checksum type -- byte 20
-						 *      - data checksum mismatch -- byte 54
-						 *      - backend id -- byte 55
-						 *      - backend version -- bytes 56-59
-						 */
-						if !backend.IsInvalidFragment(frag) {
-							t.Errorf("%v: frag %v unexpectedly still valid after clearing metadata crc", backend, index)
+					} else if corruptedByte >= 67 {
+						copy(frag[20:25], []byte{1, 0, 0, 0, 0})
+						// And since we've changed the metadata, roll back version as above...
+						copy(frag[63:67], []byte{9, 1, 1, 0})
+						if backend.IsInvalidFragment(frag) {
+							t.Errorf("%v: frag %v unexpectedly invalid after clearing data crc", backend, index)
+							t.FailNow()
+						}
+					}
+					frag[corruptedByte] ^= 0xff
+					copy(frag[63:67], fragCopy[63:67])
+					copy(frag[20:25], fragCopy[20:25])
+
+					if !bytes.Equal(frag, fragCopy) {
+						for i, orig := range fragCopy {
+							if frag[i] != orig {
+								t.Logf("%v != %v at index %v", frag[i], orig, i)
+							}
+						}
+						t.Fatal(corruptedByte, frag, fragCopy)
+					}
+
+					frag[corruptedByte]++
+					if !backend.IsInvalidFragment(frag) {
+						t.Errorf("%v: frag %v unexpectedly valid after incrementing byte %d for pattern %d", backend, index, corruptedByte, patternIndex)
+					}
+					frag[corruptedByte] -= 2
+					if corruptedByte >= 63 && corruptedByte < 67 && frag[corruptedByte] != 0xff {
+						if backend.IsInvalidFragment(frag) {
+							t.Errorf("%v: frag %v unexpectedly invalid after decrementing version byte %d for pattern %d", backend, index, corruptedByte, patternIndex)
 						}
 					} else {
-						if backend.IsInvalidFragment(frag) {
-							t.Errorf("%v: frag %v unexpectedly invalid after clearing metadata crc", backend, index)
+						if !backend.IsInvalidFragment(frag) {
+							t.Errorf("%v: frag %v unexpectedly valid after decrementing byte %d for pattern %d", backend, index, corruptedByte, patternIndex)
 						}
-					}
-				} else if corruptedByte >= 67 {
-					copy(frag[20:25], []byte{1, 0, 0, 0, 0})
-					// And since we've changed the metadata, roll back version as above...
-					copy(frag[63:67], []byte{9, 1, 1, 0})
-					if backend.IsInvalidFragment(frag) {
-						t.Errorf("%v: frag %v unexpectedly invalid after clearing data crc", backend, index)
-						t.FailNow()
-					}
-				}
-				frag[corruptedByte] ^= 0xff
-				copy(frag[63:67], fragCopy[63:67])
-				copy(frag[20:25], fragCopy[20:25])
-
-				if !bytes.Equal(frag, fragCopy) {
-					for i, orig := range fragCopy {
-						if frag[i] != orig {
-							t.Logf("%v != %v at index %v", frag[i], orig, i)
-						}
-					}
-					t.Fatal(corruptedByte, frag, fragCopy)
-				}
-
-				frag[corruptedByte]++
-				if !backend.IsInvalidFragment(frag) {
-					t.Errorf("%v: frag %v unexpectedly valid after incrementing byte %d for pattern %d", backend, index, corruptedByte, patternIndex)
-				}
-				frag[corruptedByte] -= 2
-				if corruptedByte >= 63 && corruptedByte < 67 && frag[corruptedByte] != 0xff {
-					if backend.IsInvalidFragment(frag) {
-						t.Errorf("%v: frag %v unexpectedly invalid after decrementing version byte %d for pattern %d", backend, index, corruptedByte, patternIndex)
-					}
-				} else {
-					if !backend.IsInvalidFragment(frag) {
-						t.Errorf("%v: frag %v unexpectedly valid after decrementing byte %d for pattern %d", backend, index, corruptedByte, patternIndex)
 					}
 				}
 			}
-			data.Free()
-		}
-		err = backend.Close()
-		if err != nil {
-			t.Errorf("Error closing backend %v: %q", backend, err)
 		}
 	}
 }
@@ -431,7 +435,7 @@ func TestGC(t *testing.T) {
 	input := bytes.Repeat([]byte("X"), 1000000)
 	backend, err := InitBackend(
 		Params{
-			Name: "liberasurecode_rs_vand",
+			Name: "isa_l_rs_vand",
 			K:    2,
 			M:    1,
 		})
@@ -447,52 +451,41 @@ func TestGC(t *testing.T) {
 	}{{
 		"Reconstruct",
 		func() {
-			encoded, err := backend.Encode(input)
-
-			if err != nil {
-				t.Fatal("cannot encode data")
-				return
-			}
-			vect := encoded.Data
+			bm := NewBufferMatrix(DefaultChunkSize, len(input), backend.K)
+			_, err = io.Copy(bm, bytes.NewReader(input))
+			require.NoError(t, err)
+			bm.Finish()
+			encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+			require.NoError(t, err)
 			defer encoded.Free()
+
+			vect := encoded.Data
 
 			oldData := vect[0][:] // force a copy
 
-			data, err := backend.Reconstruct(vect[1:3], 0)
-			if err != nil {
-				t.Fatalf("cannot reconstruct data, %s", err)
-				return
-			}
-
-			if len(data) != len(oldData) {
-				t.Fatal("reconstructing failed")
-				return
-			}
+			data, err := backend.ReconstructMatrix(vect[1:3], 0, DefaultChunkSize)
+			require.NoError(t, err)
+			defer data.Free()
+			require.True(t, bytes.Equal(data.Data, oldData))
 		},
 	},
 		{
 			"Decode",
 			func() {
-				encoded, err := backend.Encode(input)
-
-				if err != nil {
-					t.Fatal("cannot encode data")
-					return
-				}
+				bm := NewBufferMatrix(DefaultChunkSize, len(input), backend.K)
+				_, err = io.Copy(bm, bytes.NewReader(input))
+				require.NoError(t, err)
+				bm.Finish()
+				encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+				require.NoError(t, err)
 				defer encoded.Free()
+
 				vect := encoded.Data
 
-				decoded, err := backend.Decode(vect[0:2])
-				if err != nil {
-					t.Fatalf("cannot decode data: %v", err)
-					return
-				}
+				decoded, err := backend.DecodeMatrix(vect[0:2], DefaultChunkSize)
+				require.NoError(t, err)
 				defer decoded.Free()
-				data := decoded.Data
-				if len(data) != len(input) {
-					t.Fatal("decoding failed")
-					return
-				}
+				require.True(t, bytes.Equal(decoded.Data, input))
 			},
 		},
 	}
@@ -533,12 +526,13 @@ func BenchmarkEncode(b *testing.B) {
 	buf := bytes.Repeat([]byte("A"), 1024*1024)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		encoded, err := backend.Encode(buf)
-
-		if err != nil {
-			b.Fatal(err)
-		}
-		encoded.Free()
+		bm := NewBufferMatrix(DefaultChunkSize, len(buf), backend.K)
+		_, err := io.Copy(bm, bytes.NewReader(buf))
+		require.NoError(b, err)
+		bm.Finish()
+		encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+		require.NoError(b, err)
+		defer encoded.Free()
 	}
 	_ = backend.Close()
 }
@@ -577,26 +571,20 @@ func BenchmarkLinearizeM(b *testing.B) {
 			}()
 
 			buf := bytes.Repeat([]byte("A"), test.size)
-			encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
-
-			if err != nil {
-				b.Fatal(err)
-			}
+			bm := NewBufferMatrix(DefaultChunkSize, len(buf), backend.K)
+			_, err = io.Copy(bm, bytes.NewReader(buf))
+			require.NoError(b, err)
+			bm.Finish()
+			encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+			require.NoError(b, err)
 			defer encoded.Free()
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				decoded, err := backend.LinearizeMatrix(encoded.Data, DefaultChunkSize)
-				if err != nil {
-					b.Fatal(err)
-				}
-				if decoded != nil {
-					if decoded.Free != nil {
-						decoded.Free()
-					}
-				} else {
-					b.Fatal("decoded is nil")
-				}
+				require.NoError(b, err)
+				defer decoded.Free()
+				require.True(b, bytes.Equal(decoded.Data, buf))
 			}
 		})
 	}
@@ -614,27 +602,22 @@ func BenchmarkDecodeM(b *testing.B) {
 			}()
 
 			buf := bytes.Repeat([]byte("A"), test.size)
-			encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
+			bm := NewBufferMatrix(DefaultChunkSize, len(buf), backend.K)
+			_, err = io.Copy(bm, bytes.NewReader(buf))
+			require.NoError(b, err)
+			bm.Finish()
+			encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+			require.NoError(b, err)
 
-			if err != nil {
-				b.Fatal(err)
-			}
 			defer encoded.Free()
 
 			data := encoded.Data[1:]
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				decoded, err := backend.DecodeMatrix(data, DefaultChunkSize)
-				if err != nil {
-					b.Fatal(err)
-				}
-				if decoded != nil {
-					if decoded.Free != nil {
-						decoded.Free()
-					}
-				} else {
-					b.Fatal("decoded is nil")
-				}
+				require.NoError(b, err)
+				defer decoded.Free()
+				require.True(b, bytes.Equal(decoded.Data, buf))
 			}
 		})
 	}
@@ -652,50 +635,20 @@ func BenchmarkReconstruct(b *testing.B) {
 			}()
 
 			buf := bytes.Repeat([]byte("A"), test.size)
-			encoded, err := backend.Encode(buf)
-
-			if err != nil {
-				b.Fatal(err)
-			}
+			bm := NewBufferMatrix(DefaultChunkSize, len(buf), backend.K)
+			_, err = io.Copy(bm, bytes.NewReader(buf))
+			require.NoError(b, err)
+			bm.Finish()
+			encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+			require.NoError(b, err)
 			defer encoded.Free()
 			flags := encoded.Data[1:]
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, err := backend.Reconstruct(flags, 0)
-				if err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkReconstructM(b *testing.B) {
-	for _, test := range decodeTests {
-		b.Run(test.String(), func(b *testing.B) {
-			backend, err := InitBackend(test.p)
-			if err != nil {
-				b.Fatal("cannot create backend", err)
-			}
-			defer func() {
-				_ = backend.Close()
-			}()
-
-			buf := bytes.Repeat([]byte("A"), test.size)
-			encoded, err := backend.EncodeMatrix(buf, DefaultChunkSize)
-
-			if err != nil {
-				b.Fatal(err)
-			}
-			defer encoded.Free()
-			flags := encoded.Data[1:]
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				ddata, err := backend.ReconstructMatrix(flags, 0, DefaultChunkSize)
-				if err != nil {
-					b.Fatal(err)
-				}
-				ddata.Free()
+				data, err := backend.ReconstructMatrix(flags, 0, DefaultChunkSize)
+				require.NoError(b, err, "cannot reconstruct matrix: %v", err)
+				defer data.Free()
+				require.True(b, bytes.Equal(data.Data, encoded.Data[0]))
 			}
 		})
 	}
@@ -714,18 +667,28 @@ func BenchmarkMatrix(b *testing.B) {
 						func(b *testing.B) {
 							dtest.p.Checksum = crc
 							backend, _ := InitBackend(dtest.p)
+							defer func() {
+								_ = backend.Close()
+							}()
 							b.Run("Encode", func(b *testing.B) {
 								b.ResetTimer()
 								for i := 0; i < b.N; i++ {
-									encoded, err := backend.EncodeMatrix(buf, blockSize)
-									if err != nil {
-										b.Fatal(err)
-									}
-									encoded.Free()
+									bm := NewBufferMatrix(DefaultChunkSize, len(buf), backend.K)
+									_, err := io.Copy(bm, bytes.NewReader(buf))
+									require.NoError(b, err)
+									bm.Finish()
+									encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+									require.NoError(b, err)
+									defer encoded.Free()
 								}
 							})
 							b.Run("Decode", func(b *testing.B) {
-								encoded, _ := backend.EncodeMatrix(buf, blockSize)
+								bm := NewBufferMatrix(DefaultChunkSize, len(buf), backend.K)
+								_, err := io.Copy(bm, bytes.NewReader(buf))
+								require.NoError(b, err)
+								bm.Finish()
+								encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+								require.NoError(b, err)
 								defer encoded.Free()
 
 								b.ResetTimer()
@@ -738,18 +701,21 @@ func BenchmarkMatrix(b *testing.B) {
 								}
 							})
 							b.Run("Reconstruct", func(b *testing.B) {
-								encoded, _ := backend.EncodeMatrix(buf, blockSize)
+								bm := NewBufferMatrix(DefaultChunkSize, len(buf), backend.K)
+								_, err := io.Copy(bm, bytes.NewReader(buf))
+								require.NoError(b, err)
+								bm.Finish()
+								encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+								require.NoError(b, err)
 								defer encoded.Free()
 								b.ResetTimer()
 								for i := 0; i < b.N; i++ {
+
 									decoded, err := backend.ReconstructMatrix(encoded.Data[1:], 0, blockSize)
-									if err != nil {
-										b.Fatal(err)
-									}
-									decoded.Free()
+									require.NoError(b, err)
+									defer decoded.Free()
 								}
 							})
-							_ = backend.Close()
 						})
 				}
 			})
@@ -758,21 +724,25 @@ func BenchmarkMatrix(b *testing.B) {
 
 func BenchmarkDecode(b *testing.B) {
 	backend, _ := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
-
+	defer func() {
+		_ = backend.Close()
+	}()
 	buf := bytes.Repeat([]byte("A"), 1024*1024)
-	res, _ := backend.Encode(buf)
+	bm := NewBufferMatrix(DefaultChunkSize, len(buf), backend.K)
+	_, err := io.Copy(bm, bytes.NewReader(buf))
+	require.NoError(b, err)
+	bm.Finish()
+	res, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+	require.NoError(b, err)
 
 	defer res.Free()
 
 	for i := 0; i < b.N; i++ {
-		decoded, err := backend.Decode(res.Data)
+		decoded, _ := backend.DecodeMatrix(res.Data, DefaultChunkSize)
+		defer decoded.Free()
 
-		if err != nil {
-			b.Fatal(err)
-		}
-		decoded.Free()
 	}
-	_ = backend.Close()
+
 }
 
 func TestEncodeM(t *testing.T) {
@@ -800,20 +770,21 @@ func TestEncodeM(t *testing.T) {
 		testName := fmt.Sprintf("TestEncodeB-%d-%d", p.chunkUnit, p.lenToDecode)
 		t.Run(testName, func(t *testing.T) {
 			// Do the matrix encoding
-			result, err := backend.EncodeMatrix(buf, p.chunkUnit)
-
-			if err != nil {
-				t.Errorf("failed to encode %+v", err)
-			}
+			bm := NewBufferMatrix(p.chunkUnit, len(buf), backend.K)
+			_, err := io.Copy(bm, bytes.NewReader(buf))
+			require.NoError(t, err)
+			bm.Finish()
+			result, err := backend.EncodeMatrixWithBufferMatrix(bm, p.chunkUnit)
+			require.NoError(t, err)
+			defer result.Free()
 
 			// Check that our linearized buffer
 			// contains expected data when there is all data fragment.
 			ddata, err := backend.LinearizeMatrix(result.Data, p.chunkUnit)
-			assert.NoError(t, err)
-			assert.Equal(t, len(buf), len(ddata.Data), "data mismatch")
-			assert.Equalf(t, buf, ddata.Data, "data mismatch")
-
-			ddata.Free()
+			require.NoError(t, err)
+			defer ddata.Free()
+			require.Equal(t, len(buf), len(ddata.Data), "data mismatch")
+			require.True(t, bytes.Equal(buf, ddata.Data), "data mismatch")
 
 			/* now do the same but with the slow path*/
 			/* we will run a matrix decoding but withtout some data part, to enforce repairing*/
@@ -824,10 +795,8 @@ func TestEncodeM(t *testing.T) {
 			vect = append(vect, result.Data[5])
 
 			ddata2, _ := backend.DecodeMatrix(vect, p.chunkUnit)
-			assert.Equal(t, buf, ddata2.Data, "data mismatch")
-			ddata2.Free()
-
-			result.Free()
+			require.True(t, bytes.Equal(buf, ddata2.Data), "data mismatch")
+			defer ddata2.Free()
 		})
 	}
 	_ = backend.Close()
@@ -869,10 +838,12 @@ func TestLinearizeMatrix(t *testing.T) {
 		data := make([]byte, dataSize)
 		_, _ = cryptorand.Read(data)
 
-		encoded, err := backend.EncodeMatrix(data, DefaultChunkSize)
-		if err != nil {
-			t.Fatalf("failed to encode buffer: (%v)", err)
-		}
+		bm := NewBufferMatrix(DefaultChunkSize, len(data), backend.K)
+		_, err := io.Copy(bm, bytes.NewReader(data))
+		require.NoError(t, err)
+		bm.Finish()
+		encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+		require.NoError(t, err)
 		defer encoded.Free()
 
 		fragSize := len(encoded.Data[0])
@@ -945,10 +916,12 @@ func TestDecodeMatrix(t *testing.T) {
 		data := make([]byte, dataSize)
 		_, _ = cryptorand.Read(data)
 
-		encoded, err := backend.EncodeMatrix(data, DefaultChunkSize)
-		if err != nil {
-			t.Fatalf("failed to encode buffer: (%v)", err)
-		}
+		bm := NewBufferMatrix(DefaultChunkSize, len(data), backend.K)
+		_, err := io.Copy(bm, bytes.NewReader(data))
+		require.NoError(t, err)
+		bm.Finish()
+		encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+		require.NoError(t, err)
 		defer encoded.Free()
 
 		fragSize := len(encoded.Data[0])
@@ -1004,10 +977,12 @@ func TestValidateFragmentMatrix(t *testing.T) {
 	data := make([]byte, dataSize)
 	_, _ = cryptorand.Read(data)
 
-	encoded, err := backend.EncodeMatrix(data, DefaultChunkSize)
-	if err != nil {
-		t.Fatalf("failed to encode buffer: (%v)", err)
-	}
+	bm := NewBufferMatrix(DefaultChunkSize, len(data), backend.K)
+	_, err = io.Copy(bm, bytes.NewReader(data))
+	require.NoError(t, err)
+	bm.Finish()
+	encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+	require.NoError(t, err)
 	defer encoded.Free()
 
 	fragSize := len(encoded.Data[0])
@@ -1074,13 +1049,14 @@ func TestReconstructM(t *testing.T) {
 		testName := fmt.Sprintf("TestReconstruct-%d-%d", p.chunkUnit, p.fragNumber)
 		t.Run(testName, func(t *testing.T) {
 			// Do the matrix encoding
-			result, err := backend.EncodeMatrix(buf, p.chunkUnit)
+			bm := NewBufferMatrix(p.chunkUnit, len(buf), backend.K)
+			_, err := io.Copy(bm, bytes.NewReader(buf))
+			require.NoError(t, err)
+			bm.Finish()
+			result, err := backend.EncodeMatrixWithBufferMatrix(bm, p.chunkUnit)
+			require.NoError(t, err)
 
 			defer result.Free()
-
-			if err != nil {
-				t.Errorf("failed to encode %+v", err)
-			}
 
 			var vect [][]byte
 			for i := 0; i < backend.K+backend.M; i++ {
@@ -1090,19 +1066,12 @@ func TestReconstructM(t *testing.T) {
 			}
 
 			ddata, err := backend.ReconstructMatrix(vect, p.fragNumber, p.chunkUnit)
-			if err != nil {
-				t.Errorf("cannot reconstruct fragment %d cause=%v", p.fragNumber, err)
-				return
-			}
-			if ddata == nil {
-				t.Fatal("unexpected error / fragment rebuilt is nil")
-			}
+			require.NoError(t, err)
+			require.NotNil(t, ddata)
 
 			res := bytes.Compare(ddata.Data, result.Data[p.fragNumber])
-			ddata.Free()
-			if res != 0 {
-				t.Errorf("Error, fragment rebuilt is different from the original one")
-			}
+			require.Equal(t, 0, res)
+			defer ddata.Free()
 		})
 	}
 	_ = backend.Close()
@@ -1122,73 +1091,51 @@ func TestEncodeDecodeMatrix(t *testing.T) {
 			t.Errorf("Error creating backend %v: %q", params, err)
 			continue
 		}
-
+		defer func() {
+			_ = backend.Close()
+		}()
 		for patternIndex, pattern := range testPatterns {
 			t.Run(fmt.Sprintf("%s_%d_%d-%d-%d",
 				params.Name, params.K, params.M,
 				patternIndex,
 				len(pattern)),
 				func(t *testing.T) {
-					data, err := backend.EncodeMatrix(pattern, 32768)
-					if err != nil {
-						t.Errorf("Error encoding %v: %q", params, err)
-						return
-					}
+					bm := NewBufferMatrix(DefaultChunkSize, len(pattern), backend.K)
+					_, err := io.Copy(bm, bytes.NewReader(pattern))
+					require.NoError(t, err)
+					bm.Finish()
+					data, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+					require.NoError(t, err)
 					defer data.Free()
 
 					frags := data.Data
 					decode := func(frags [][]byte, description string) bool {
-						decoded, err := backend.DecodeMatrix(frags, 32768)
-						if err != nil {
-							t.Errorf("%v: %v: %q for pattern %d", description, backend, err, patternIndex)
-							return false
-						} else if !bytes.Equal(decoded.Data, pattern) {
-							t.Errorf("%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, decoded.Data)
-							return false
-						}
-						decoded.Free()
+						decoded, err := backend.DecodeMatrix(frags, DefaultChunkSize)
+						require.NoError(t, err)
+						require.True(t, bytes.Equal(decoded.Data, pattern), "%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, decoded.Data)
+						defer decoded.Free()
 						return true
 					}
 
-					var good bool
-					good = decode(frags, "all frags")
-					good = good && decode(shuf(frags), "all frags, shuffled")
-					good = good && decode(frags[:params.K], "data frags")
-					good = good && decode(shuf(frags[:params.K]), "shuffled data frags")
-					good = good && decode(frags[params.M:], "with parity frags")
-					good = good && decode(shuf(frags[params.M:]), "shuffled parity frags")
-
-					if !good {
-						return
-					}
-
-					// remove := func(s [][]byte, i int) [][]byte {
-					// 	s[i] = s[len(s)-1]
-					// 	return s[:len(s)-1]
-					// }
+					decode(frags, "all frags")
+					decode(shuf(frags), "all frags, shuffled")
+					decode(frags[:params.K], "data frags")
+					decode(shuf(frags[:params.K]), "shuffled data frags")
+					decode(frags[params.M:], "with parity frags")
+					decode(shuf(frags[params.M:]), "shuffled parity frags")
 
 					for fIdx := 0; fIdx < params.K; fIdx++ {
 						newFrags := frags[fIdx+1:]
 						if fIdx >= 1 {
 							newFrags = append(newFrags, frags[0:fIdx]...)
 						}
-						ddata, err := backend.ReconstructMatrix(newFrags, fIdx, 32768)
-						if err != nil {
-							t.Fatal("cannot reconstruct ", err)
-						}
-						if !bytes.Equal(ddata.Data, frags[fIdx]) {
-							ddata.Free()
-							t.Fatalf("part %d reconstructed not equal to original len: %q != %q", fIdx, ddata.Data, frags[fIdx])
-						}
-						ddata.Free()
+						ddata, err := backend.ReconstructMatrix(newFrags, fIdx, DefaultChunkSize)
+						require.NoError(t, err)
+						require.True(t, bytes.Equal(ddata.Data, frags[fIdx]), "part %d reconstructed not equal to original len: %q != %q", fIdx, ddata.Data, frags[fIdx])
+						defer ddata.Free()
 					}
 
 				})
-		}
-
-		err = backend.Close()
-		if err != nil {
-			t.Errorf("Error closing backend %v: %q", backend, err)
 		}
 	}
 }

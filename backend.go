@@ -310,56 +310,6 @@ func (backend *Backend) EncodeMatrixWithBufferMatrix(bm *BufferMatrix, chunkSize
 	}}, nil
 }
 
-// EncodeMatrix encodes data in small subpart of chunkSize bytes
-func (backend *Backend) EncodeMatrix(data []byte, chunkSize int) (*EncodeData, error) {
-	var wg sync.WaitGroup
-	var ctx C.struct_encode_chunk_context
-	pData := (*C.char)(unsafe.Pointer(&data[0]))
-	pDataLen := C.int(len(data))
-	cChunkSize := C.int(chunkSize)
-
-	C.encode_chunk_prepare(backend.libecDesc, pData, pDataLen, cChunkSize, &ctx)
-
-	var errCounter uint32
-
-	wg.Add(int(ctx.number_of_subgroup))
-
-	for i := 0; i < int(ctx.number_of_subgroup); i++ {
-		go func(nth int) {
-			r := C.encode_chunk(backend.libecDesc, pData, pDataLen, &ctx, C.int(nth))
-			if r < 0 {
-				atomic.AddUint32(&errCounter, 1)
-			}
-			wg.Done()
-		}(i)
-	}
-	wg.Wait()
-
-	if errCounter != 0 {
-		return &EncodeData{nil, func() {
-				C.my_liberasurecode_encode_cleanup(
-					backend.libecDesc, C.size_t(ctx.frags_len), ctx.datas, ctx.codings)
-			}},
-			fmt.Errorf("error encoding chunk (%+v encoding failed)", errCounter)
-	}
-	result := make([][]byte, backend.K+backend.M)
-	fragLen := ctx.frags_len
-	for i := 0; i < backend.K; i++ {
-		str := cGetArrayItem(ctx.datas, i)
-		result[i] = (*[1 << 30]byte)(str)[:int(C.int(fragLen)):int(C.int(fragLen))]
-
-	}
-	for i := 0; i < backend.M; i++ {
-		str := cGetArrayItem(ctx.codings, i)
-		result[i+backend.K] = (*[1 << 30]byte)(str)[:int(C.int(fragLen)):int(C.int(fragLen))]
-	}
-
-	return &EncodeData{result, func() {
-		C.my_liberasurecode_encode_cleanup(
-			backend.libecDesc, C.size_t(ctx.frags_len), ctx.datas, ctx.codings)
-	}}, nil
-}
-
 // DecodeData is the structure returned by all Decode* function
 // It contains a linearized data buffer and a Free closure (that can be null)
 // that clean some C dynamically allocated objects

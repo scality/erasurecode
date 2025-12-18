@@ -5,34 +5,81 @@ import (
 	"io"
 )
 
-type BufferMatrix struct {
-	b                  []byte
-	zero               []byte
+type BufferInfo struct {
 	hdrSize, bufSize   int
-	len                int // len of input
+	len                int
 	k                  int
 	curBlock           int
 	leftInBlock        int
-	finished           bool
 	sizeOfLastSubGroup int
-	// getOffset          func() (int, int)
-	newStyle bool
+	newStyle           bool
 }
 
 // FragLen returns the size of a "fragment" aligned to a block size (data + header)
-func (b BufferMatrix) FragLen() int {
+func (b BufferInfo) FragLen() int {
 	return b.SubGroups() * (b.bufSize + b.hdrSize)
 }
 
 // SubGroups returns the number of blocks inside a single fragment
-func (b BufferMatrix) SubGroups() int {
+func (b BufferInfo) SubGroups() int {
 	nbBlocks := (b.len + b.bufSize - 1) / b.bufSize
 	nbStripes := (nbBlocks + b.k - 1) / b.k
 	return nbStripes
 }
 
-func (b BufferMatrix) maxLen() int {
+func (b BufferInfo) maxLen() int {
 	return (b.SubGroups() * b.k) * (b.bufSize + b.hdrSize)
+}
+
+func (b BufferInfo) IsBlockInLastSubGroup(block int) bool {
+	cur := block / b.k
+	return cur == b.SubGroups()-1
+}
+
+func (b BufferInfo) ComputeSizeOfLastSubGroup() int {
+	// total of size already in previous subgroups
+	lastSubGroup := b.SubGroups() - 1
+	totalSizeInPreviousSubGroups := lastSubGroup * b.k * (b.bufSize)
+	leftSize := b.len - totalSizeInPreviousSubGroups
+	return leftSize
+}
+
+func (b BufferInfo) FragLenLastSubGroup() int {
+	if !b.newStyle {
+		return b.bufSize
+	}
+	r := b.ComputeSizeOfLastSubGroup() / b.k
+	if b.ComputeSizeOfLastSubGroup()%b.k != 0 {
+		r++
+	}
+	return r
+}
+
+func (b *BufferInfo) init(bufSize int, length int, k int) {
+	b.newStyle = true
+
+	hdrSize := fragmentHeaderSize()
+	b.hdrSize = hdrSize
+	b.bufSize = bufSize
+	b.len = length
+	b.k = k
+	b.leftInBlock = -1
+	b.curBlock = 0
+
+	b.sizeOfLastSubGroup = b.FragLenLastSubGroup()
+}
+
+func NewBufferInfo(bufSize int, length int, k int) *BufferInfo {
+	var b BufferInfo
+	b.init(bufSize, length, k)
+	return &b
+}
+
+type BufferMatrix struct {
+	b        []byte
+	zero     []byte
+	finished bool
+	BufferInfo
 }
 
 // NewBufferMatrix returns a new buffer suitable for <len> data and organized
@@ -47,16 +94,7 @@ func NewBufferMatrix(bufSize int, length int, k int) *BufferMatrix {
 // Reset serves the same purpose as NewBufferMatrix but use the existing buffer and
 // tries to avoid allocation of the underlying buffer.
 func (b *BufferMatrix) Reset(bufSize int, length int, k int) {
-	hdrSize := fragmentHeaderSize()
-	b.hdrSize = hdrSize
-	b.bufSize = bufSize
-	b.len = length
-	b.k = k
-	b.leftInBlock = -1
-	b.curBlock = 0
-	b.finished = false
-
-	b.sizeOfLastSubGroup = b.FragLenLastSubGroup()
+	b.init(bufSize, length, k)
 
 	maxLen := b.maxLen()
 
@@ -71,7 +109,7 @@ func (b *BufferMatrix) Reset(bufSize int, length int, k int) {
 	if len(b.zero) < bufSize {
 		b.zero = make([]byte, bufSize)
 	}
-	b.newStyle = false
+	b.finished = false
 }
 
 // UseNewFormat sets the buffer to use the new format.
@@ -82,6 +120,13 @@ func (b *BufferMatrix) UseNewFormat() {
 		panic("UseNewOffset must be called before any Write")
 	}
 	b.newStyle = true
+}
+
+func (b *BufferMatrix) UseOldormat() {
+	if b.curBlock != 0 || b.leftInBlock != -1 || b.finished {
+		panic("UseNewOffset must be called before any Write")
+	}
+	b.newStyle = false
 }
 
 // getOffset is a wrapper around getOffsetOld and getOffsetNew.
@@ -96,7 +141,6 @@ func (b *BufferMatrix) getOffset() (int, int) {
 var emptyErasureHeader = bytes.Repeat([]byte{0}, fragmentHeaderSize())
 
 // Finish *must* be called after the final Write() *before* using the buffer
-// in EncodeMatrix
 // It is safe to call it multiple times.
 func (b *BufferMatrix) Finish() {
 	if b.finished {

@@ -329,10 +329,10 @@ int encode_chunk_buffermatrix(int desc,
   int i, ret;
   int tot_len_sum = 0;
 
+
   if (nth >= ctx->number_of_subgroup) {
     return -1;
   }
-
   // Create the array of "data" fragments
   // No copy, just prepare the header
   for (i = 0; i < ctx->k; i++) {
@@ -349,6 +349,7 @@ int encode_chunk_buffermatrix(int desc,
     tot_len_sum += size > 0 ? (size > fraglen ? fraglen : size) : 0;
   }
 
+
   // "coding" fragments. Those ones are allocated above
   for (i = 0; i < ctx->m; i++) {
     char *ptr = &ctx->codings[i][nth * one_cell_size];
@@ -358,9 +359,11 @@ int encode_chunk_buffermatrix(int desc,
     m_ref[i] = ptr;
   }
 
+
   // do the true encoding according the backend used (isa-l, cauchy ....)
   ret = ec->common.ops->encode(ec->desc.backend_desc, k_ref, m_ref,
                                fraglen);
+
   if (ret < 0) {
     return -1;
   }
