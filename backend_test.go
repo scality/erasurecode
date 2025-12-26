@@ -201,14 +201,13 @@ func TestEncodeDecode(t *testing.T) {
 				}
 			}
 
-			decode := func(frags [][]byte, description string) bool {
+			decode := func(frags [][]byte, description string) {
 				decoded, err := backend.DecodeMatrix(frags, DefaultChunkSize)
 				require.NoError(t, err)
 				defer decoded.Free()
 				require.True(t, bytes.Equal(decoded.Data, pattern),
 					"%v:%d(%v) pattern: %v, got: %q",
 					description, patternIndex, backend, pattern, decoded.Data)
-				return true
 			}
 
 			decode(frags, "all frags")
@@ -253,12 +252,11 @@ func TestReconstruct(t *testing.T) {
 					defer data.Free()
 					frags := data.Data
 
-					reconstruct := func(recon_frags [][]byte, frag_index int, description string) bool {
+					reconstruct := func(recon_frags [][]byte, frag_index int, description string) {
 						data, err := backend.ReconstructMatrix(recon_frags, frag_index, DefaultChunkSize)
 						require.NoError(t, err, "%v: %v: %q for pattern %d", description, backend, err, patternIndex)
 						defer data.Free()
 						require.True(t, bytes.Equal(data.Data, frags[frag_index]), "%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, data.Data)
-						return true
 					}
 					reconstruct(shuf(frags[:params.K]), params.K+params.M-1, "last frag from data frags")
 					reconstruct(shuf(frags[params.M:]), 0, "first frag with parity frags")
@@ -802,17 +800,107 @@ func TestEncodeM(t *testing.T) {
 	_ = backend.Close()
 }
 
-func TestLinearizeMatrix(t *testing.T) {
-	assert := assert.New(t)
+func TestTwoLinearizeMatrix(t *testing.T) {
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 2, M: 1, W: 8, HD: 5})
+	require.NoError(t, err)
+	defer func() {
+		_ = backend.Close()
+	}()
+	currentChunkSize := 512
+	dataSize := currentChunkSize*2 + 10
+	startIncl := dataSize - 3
+	endIncl := dataSize - 1
 
+	data := make([]byte, dataSize)
+	for i := range dataSize {
+		data[i] = byte('A' + i%26)
+	}
+	bm := NewBufferMatrix(currentChunkSize, len(data), backend.K)
+	_, err = io.Copy(bm, bytes.NewReader(data))
+	require.NoError(t, err)
+	bm.Finish()
+	encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, currentChunkSize)
+	require.NoError(t, err)
+	defer encoded.Free()
+
+	rangeM := backend.GetRangeMatrix(startIncl, endIncl, currentChunkSize, len(encoded.Data[0]))
+	require.NotNil(t, rangeM)
+
+	/* Decode the matrix as if it was requested and
+	   checks that the result matches the payload on the requested range. */
+	frags := make([][]byte, 0)
+	for i := 0; i < rangeM.FragCount; i++ {
+		fragIdx := (rangeM.FragFirstIncl + i) % backend.K
+		buffer := encoded.Data[fragIdx][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl]
+		frags = append(frags, buffer)
+	}
+
+	decoded, err := backend.LinearizeMatrix(frags, currentChunkSize)
+	require.NoError(t, err)
+	defer decoded.Free()
+
+	expected := data[startIncl:endIncl]
+
+	linearizedRangeEndExcl := rangeM.LinearizedRangeStartIncl + (endIncl - startIncl)
+	found := decoded.Data[rangeM.LinearizedRangeStartIncl:linearizedRangeEndExcl]
+
+	require.True(t, bytes.Equal(expected, found))
+}
+
+func TestOneLinearizeMatrix(t *testing.T) {
+	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
+	require.NoError(t, err)
+	defer func() {
+		_ = backend.Close()
+	}()
+	dataSize := 105623
+	startIncl := 59441
+	endIncl := 64149
+	data := make([]byte, dataSize)
+	for i := range dataSize {
+		data[i] = byte('A' + i%26)
+	}
+	bm := NewBufferMatrix(DefaultChunkSize, len(data), backend.K)
+	_, err = io.Copy(bm, bytes.NewReader(data))
+	require.NoError(t, err)
+	bm.Finish()
+	encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
+	require.NoError(t, err)
+	defer encoded.Free()
+
+	rangeM := backend.GetRangeMatrix(startIncl, endIncl, DefaultChunkSize, len(encoded.Data[0]))
+	require.NotNil(t, rangeM)
+
+	/* Decode the matrix as if it was requested and
+	   checks that the result matches the payload on the requested range. */
+	frags := make([][]byte, 0)
+	for i := 0; i < rangeM.FragCount; i++ {
+		fragIdx := (rangeM.FragFirstIncl + i) % backend.K
+		buffer := encoded.Data[fragIdx][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl]
+		frags = append(frags, buffer)
+	}
+
+	decoded, err := backend.LinearizeMatrix(frags, DefaultChunkSize)
+	require.NoError(t, err)
+	defer decoded.Free()
+
+	expected := data[startIncl : endIncl+1]
+
+	linearizedRangeEndExcl := rangeM.LinearizedRangeStartIncl + (endIncl - startIncl) + 1
+	found := decoded.Data[rangeM.LinearizedRangeStartIncl:linearizedRangeEndExcl]
+	require.True(t, bytes.Equal(expected, found))
+}
+
+func TestLinearizeMatrix(t *testing.T) {
 	pieceSize := DefaultChunkSize
 	k := 4
 	m := 1
 
 	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: k, M: m, W: 8, HD: m})
-	if err != nil {
-		t.Fatalf("cannot init backend: (%v)", err)
-	}
+	require.NoError(t, err)
+	defer func() {
+		_ = backend.Close()
+	}()
 
 	rangeValues := func(values []reflect.Value, rng *rand.Rand) {
 		dataSize := 1 + rng.Intn(7*1024*1024)
@@ -848,7 +936,7 @@ func TestLinearizeMatrix(t *testing.T) {
 
 		fragSize := len(encoded.Data[0])
 		rangeM := backend.GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize)
-		assert.NotNil(rangeM)
+		require.NotNil(t, rangeM)
 
 		/* Decode the matrix as if it was requested and
 		   checks that the result matches the payload on the requested range. */
@@ -860,7 +948,7 @@ func TestLinearizeMatrix(t *testing.T) {
 		}
 
 		decoded, err := backend.LinearizeMatrix(frags, pieceSize)
-		assert.Nil(err)
+		require.NoError(t, err)
 		defer decoded.Free()
 
 		expected := data[startIncl : endIncl+1]
@@ -874,9 +962,8 @@ func TestLinearizeMatrix(t *testing.T) {
 		Values: rangeValues,
 	}
 
-	if err := quick.Check(checkRange, &config); err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, quick.Check(checkRange, &config))
+
 }
 
 func TestDecodeMatrix(t *testing.T) {
@@ -1109,12 +1196,11 @@ func TestEncodeDecodeMatrix(t *testing.T) {
 					defer data.Free()
 
 					frags := data.Data
-					decode := func(frags [][]byte, description string) bool {
+					decode := func(frags [][]byte, description string) {
 						decoded, err := backend.DecodeMatrix(frags, DefaultChunkSize)
 						require.NoError(t, err)
 						require.True(t, bytes.Equal(decoded.Data, pattern), "%v: Expected %v to roundtrip pattern %d, got %q", description, backend, patternIndex, decoded.Data)
 						defer decoded.Free()
-						return true
 					}
 
 					decode(frags, "all frags")

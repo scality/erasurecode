@@ -372,7 +372,6 @@ func (backend *Backend) ChunkInfo(fragRangeLen int, pieceSize int) ChunkInfo {
 	if nrChunks*chunkSize != fragRangeLen {
 		nrChunks++
 	}
-
 	return ChunkInfo{
 		ChunkSize: chunkSize,
 		NrChunk:   nrChunks,
@@ -392,7 +391,7 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 	/* Fragments are sorted beforehand with the index of the first chunk.
 	   All chunks of a fragments share the same index. */
 	fragsIndex := make([]int, len(frags))
-	for i := 0; i < len(frags); i++ {
+	for i := range frags {
 		fragsIndex[i] = i
 	}
 
@@ -591,41 +590,65 @@ type RangeMatrix struct {
  *     p4 [-[*]- -]
  *
  */
-func (backend *Backend) GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize int) *RangeMatrix {
-	chunkSize := pieceSize + backend.headerSize
-	groupSize := pieceSize * backend.K
+func (backend *Backend) GetRangeMatrix(startIncl, endIncl, cellDataSize, fragSize int) *RangeMatrix {
+	nrColumns := backend.K
+	cellSize := cellDataSize + backend.headerSize
+	lineSize := cellDataSize * nrColumns
 
 	/* At this point we don't know what is the true payload size, but we
 	   can at least check that it doesn't exceed the maximum payload that
 	   this configuration can handle. */
-	nrChunkByFrag := fragSize / chunkSize
-	dataLenPerFrag := fragSize - nrChunkByFrag*backend.headerSize
-	maxDataLen := dataLenPerFrag * backend.K
-	if startIncl >= maxDataLen || endIncl >= maxDataLen || startIncl > endIncl {
+	nrLines := fragSize / cellSize
+
+	/* Inside a fragment (ie, inside a column), what is the
+	   stored amount of data? */
+	fragDataSize := fragSize - nrLines*backend.headerSize
+
+	maxDataSize := fragDataSize * nrColumns
+
+	if startIncl >= maxDataSize || endIncl >= maxDataSize || startIncl > endIncl {
 		return nil
 	}
 
-	pieceStartIncl := startIncl / pieceSize
-	pieceEndIncl := endIncl / pieceSize
+	/* convert cells indices to (x,y) indices */
 
-	groupStartIncl := pieceStartIncl / backend.K
-	groupEndIncl := pieceEndIncl / backend.K
+	/* Considering our (x,y) matrix as a single row, what
+	   are the indices of the start and end of the range we are interested in? */
+	idxStart := startIncl / cellDataSize
+	idxEnd := endIncl / cellDataSize
 
-	fragFirstIncl := pieceStartIncl % backend.K
-	fragCount := (pieceEndIncl + 1 - pieceStartIncl)
-	dataOffset := pieceStartIncl * pieceSize
+	/* as we have the indices of the first cell and the last cell,
+	 * we can derive the indices of the first line and the last line
+	 * Based on this first line and last line, we can deduce
+	 * the amount of data to read in each fragment.
+	 */
+	lineStart := idxStart / nrColumns
+	lineEnd := idxEnd / nrColumns
+
+	/*
+	 * as we have the indices of the first cell and the last cell,
+	 * we can compute the first column (e.g the first fragment)
+	 * where to start the read
+	 */
+	columnStart := idxStart % nrColumns
+
+	nrCellsToRead := (idxEnd + 1 - idxStart)
+	dataOffset := idxStart * cellDataSize
+
+	totalLines := (maxDataSize + lineSize - 1) / lineSize
+	isLastStripe := (lineEnd == totalLines-1)
 
 	/* When wrapping around, we read the full groups. */
-	if fragFirstIncl+fragCount > backend.K {
-		fragFirstIncl = 0
-		fragCount = backend.K
-		dataOffset = groupStartIncl * groupSize
+	if columnStart+nrCellsToRead > nrColumns || isLastStripe {
+		columnStart = 0
+		nrCellsToRead = nrColumns
+		dataOffset = lineStart * lineSize
 	}
 
 	/* For each fragment, this is the minimum range to read -- including
 	   the header -- to decode or repair the data. */
-	inFragRangeStartIncl := groupStartIncl * chunkSize
-	inFragRangeEndExcl := (groupEndIncl + 1) * chunkSize
+	inFragRangeStartIncl := lineStart * cellSize
+	inFragRangeEndExcl := (lineEnd + 1) * cellSize
 
 	/* The output buffer only contains the data necessary to read the range,
 	   and the requested range must be adjusted to be relative
@@ -637,13 +660,13 @@ func (backend *Backend) GetRangeMatrix(startIncl, endIncl, pieceSize, fragSize i
 	linearizedRangeStartIncl := startIncl - dataOffset
 
 	/* Decoding always works on a group boundary. */
-	decodedRangeStartIncl := startIncl - groupStartIncl*groupSize
+	decodedRangeStartIncl := startIncl - lineStart*lineSize
 
 	return &RangeMatrix{
 		ReqStartIncl:             startIncl,
 		ReqEndIncl:               endIncl,
-		FragFirstIncl:            fragFirstIncl,
-		FragCount:                fragCount,
+		FragFirstIncl:            columnStart,
+		FragCount:                nrCellsToRead,
 		InFragRangeStartIncl:     inFragRangeStartIncl,
 		InFragRangeEndExcl:       inFragRangeEndExcl,
 		DecodedRangeStartIncl:    decodedRangeStartIncl,
