@@ -800,95 +800,111 @@ func TestEncodeM(t *testing.T) {
 	_ = backend.Close()
 }
 
-func TestTwoLinearizeMatrix(t *testing.T) {
+func TestLinearizeMatrixAndReconstruct(t *testing.T) {
 	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 2, M: 1, W: 8, HD: 5})
 	require.NoError(t, err)
 	defer func() {
 		_ = backend.Close()
 	}()
-	currentChunkSize := 512
-	dataSize := currentChunkSize*2 + 10
-	startIncl := dataSize - 3
-	endIncl := dataSize - 1
 
-	data := make([]byte, dataSize)
-	for i := range dataSize {
-		data[i] = byte('A' + i%26)
-	}
-	bm := NewBufferMatrix(currentChunkSize, len(data), backend.K)
-	_, err = io.Copy(bm, bytes.NewReader(data))
-	require.NoError(t, err)
-	bm.Finish()
-	encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, currentChunkSize)
-	require.NoError(t, err)
-	defer encoded.Free()
-
-	rangeM := backend.GetRangeMatrix(startIncl, endIncl, currentChunkSize, len(encoded.Data[0]))
-	require.NotNil(t, rangeM)
-
-	/* Decode the matrix as if it was requested and
-	   checks that the result matches the payload on the requested range. */
-	frags := make([][]byte, 0)
-	for i := 0; i < rangeM.FragCount; i++ {
-		fragIdx := (rangeM.FragFirstIncl + i) % backend.K
-		buffer := encoded.Data[fragIdx][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl]
-		frags = append(frags, buffer)
-	}
-
-	decoded, err := backend.LinearizeMatrix(frags, currentChunkSize)
-	require.NoError(t, err)
-	defer decoded.Free()
-
-	expected := data[startIncl:endIncl]
-
-	linearizedRangeEndExcl := rangeM.LinearizedRangeStartIncl + (endIncl - startIncl)
-	found := decoded.Data[rangeM.LinearizedRangeStartIncl:linearizedRangeEndExcl]
-
-	require.True(t, bytes.Equal(expected, found))
-}
-
-func TestOneLinearizeMatrix(t *testing.T) {
-	backend, err := InitBackend(Params{Name: "isa_l_rs_vand", K: 4, M: 2, W: 8, HD: 5})
-	require.NoError(t, err)
-	defer func() {
-		_ = backend.Close()
-	}()
-	dataSize := 105623
-	startIncl := 59441
-	endIncl := 64149
-	data := make([]byte, dataSize)
-	for i := range dataSize {
-		data[i] = byte('A' + i%26)
-	}
-	bm := NewBufferMatrix(DefaultChunkSize, len(data), backend.K)
-	_, err = io.Copy(bm, bytes.NewReader(data))
-	require.NoError(t, err)
-	bm.Finish()
-	encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, DefaultChunkSize)
-	require.NoError(t, err)
-	defer encoded.Free()
-
-	rangeM := backend.GetRangeMatrix(startIncl, endIncl, DefaultChunkSize, len(encoded.Data[0]))
-	require.NotNil(t, rangeM)
-
-	/* Decode the matrix as if it was requested and
-	   checks that the result matches the payload on the requested range. */
-	frags := make([][]byte, 0)
-	for i := 0; i < rangeM.FragCount; i++ {
-		fragIdx := (rangeM.FragFirstIncl + i) % backend.K
-		buffer := encoded.Data[fragIdx][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl]
-		frags = append(frags, buffer)
+	testParams := []struct {
+		chunkSize    int
+		dataSize     int
+		startIncl    int
+		endIncl      int
+		useOldFormat bool
+	}{
+		{
+			chunkSize: 512,
+			dataSize:  512*2 + 10,
+			startIncl: 512*2 - 3,
+			endIncl:   512*2 - 1,
+		},
+		{
+			chunkSize: DefaultChunkSize,
+			dataSize:  105623,
+			startIncl: 59441,
+			endIncl:   64149,
+		},
+		{
+			chunkSize:    512,
+			dataSize:     512*2 + 10,
+			startIncl:    512*2 - 3,
+			endIncl:      512*2 - 1,
+			useOldFormat: true,
+		},
+		{
+			chunkSize:    DefaultChunkSize,
+			dataSize:     105623,
+			startIncl:    59441,
+			endIncl:      64149,
+			useOldFormat: true,
+		},
 	}
 
-	decoded, err := backend.LinearizeMatrix(frags, DefaultChunkSize)
-	require.NoError(t, err)
-	defer decoded.Free()
+	for _, param := range testParams {
+		p := param
+		testName := fmt.Sprintf("TestLinearizeMatrixAndReconstruct(oldformat=%v)-%d-%d-%d-%d",
+			p.useOldFormat, p.chunkSize, p.dataSize, p.startIncl, p.endIncl,
+		)
+		t.Run(testName, func(t *testing.T) {
+			currentChunkSize := p.chunkSize
+			dataSize := p.dataSize
+			startIncl := p.startIncl
+			endIncl := p.endIncl
 
-	expected := data[startIncl : endIncl+1]
+			data := make([]byte, dataSize)
+			for i := range dataSize {
+				data[i] = byte('A' + i%26)
+			}
+			bm := NewBufferMatrix(currentChunkSize, len(data), backend.K)
+			if p.useOldFormat {
+				bm.UseOldFormat()
+			}
+			_, err = io.Copy(bm, bytes.NewReader(data))
+			require.NoError(t, err)
+			bm.Finish()
+			encoded, err := backend.EncodeMatrixWithBufferMatrix(bm, currentChunkSize)
+			require.NoError(t, err)
+			defer encoded.Free()
 
-	linearizedRangeEndExcl := rangeM.LinearizedRangeStartIncl + (endIncl - startIncl) + 1
-	found := decoded.Data[rangeM.LinearizedRangeStartIncl:linearizedRangeEndExcl]
-	require.True(t, bytes.Equal(expected, found))
+			rangeM := backend.GetRangeMatrix(startIncl, endIncl, currentChunkSize, len(encoded.Data[0]))
+			require.NotNil(t, rangeM)
+
+			/* Decode the matrix as if it was requested and
+			   checks that the result matches the payload on the requested range. */
+			frags := make([][]byte, 0)
+			for i := 0; i < rangeM.FragCount; i++ {
+				fragIdx := (rangeM.FragFirstIncl + i) % backend.K
+				buffer := encoded.Data[fragIdx][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl]
+				frags = append(frags, buffer)
+			}
+
+			decoded, err := backend.LinearizeMatrix(frags, currentChunkSize)
+			require.NoError(t, err)
+			defer decoded.Free()
+
+			expected := data[startIncl:endIncl]
+
+			linearizedRangeEndExcl := rangeM.LinearizedRangeStartIncl + (endIncl - startIncl)
+			found := decoded.Data[rangeM.LinearizedRangeStartIncl:linearizedRangeEndExcl]
+
+			require.True(t, bytes.Equal(expected, found))
+
+			frags2 := make([][]byte, 0)
+			for i := 0; i < backend.K+backend.M; i++ {
+				frags2 = append(frags2, encoded.Data[i][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl])
+			}
+
+			// now do the same test, but this time, insted of linearizing, we are going to reconstruct the stripes
+			reconstructed, err := backend.ReconstructMatrix(frags2[1:], 0, currentChunkSize)
+
+			require.NoError(t, err)
+			defer reconstructed.Free()
+
+			require.True(t, bytes.Equal(frags2[0], reconstructed.Data))
+		})
+	}
 }
 
 func TestLinearizeMatrix(t *testing.T) {

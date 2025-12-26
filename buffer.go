@@ -122,7 +122,7 @@ func (b *BufferMatrix) UseNewFormat() {
 	b.newStyle = true
 }
 
-func (b *BufferMatrix) UseOldormat() {
+func (b *BufferMatrix) UseOldFormat() {
 	if b.curBlock != 0 || b.leftInBlock != -1 || b.finished {
 		panic("UseNewOffset must be called before any Write")
 	}
