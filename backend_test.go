@@ -815,16 +815,11 @@ func TestLinearizeMatrixAndReconstruct(t *testing.T) {
 		useOldFormat bool
 	}{
 		{
-			chunkSize: 512,
-			dataSize:  512*2 + 10,
-			startIncl: 512*2 - 3,
-			endIncl:   512*2 - 1,
-		},
-		{
-			chunkSize: DefaultChunkSize,
-			dataSize:  105623,
-			startIncl: 59441,
-			endIncl:   64149,
+			chunkSize:    512,
+			dataSize:     512*2 + 10,
+			startIncl:    512*2 - 3,
+			endIncl:      512*2 - 1,
+			useOldFormat: false,
 		},
 		{
 			chunkSize:    512,
@@ -838,7 +833,29 @@ func TestLinearizeMatrixAndReconstruct(t *testing.T) {
 			dataSize:     105623,
 			startIncl:    59441,
 			endIncl:      64149,
+			useOldFormat: false,
+		},
+
+		{
+			chunkSize:    DefaultChunkSize,
+			dataSize:     105623,
+			startIncl:    59441,
+			endIncl:      64149,
 			useOldFormat: true,
+		},
+		{
+			chunkSize:    DefaultChunkSize,
+			dataSize:     105623,
+			startIncl:    105610,
+			endIncl:      105622,
+			useOldFormat: true,
+		},
+		{
+			chunkSize:    DefaultChunkSize,
+			dataSize:     105623,
+			startIncl:    105610,
+			endIncl:      105622,
+			useOldFormat: false,
 		},
 	}
 

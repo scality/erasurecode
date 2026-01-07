@@ -117,14 +117,14 @@ func (b *BufferMatrix) Reset(bufSize int, length int, k int) {
 // Note: will panic if called after any Write() or ReadFrom()
 func (b *BufferMatrix) UseNewFormat() {
 	if b.curBlock != 0 || b.leftInBlock != -1 || b.finished {
-		panic("UseNewOffset must be called before any Write")
+		panic("UseNewFormat must be called before any Write")
 	}
 	b.newStyle = true
 }
 
 func (b *BufferMatrix) UseOldFormat() {
 	if b.curBlock != 0 || b.leftInBlock != -1 || b.finished {
-		panic("UseNewOffset must be called before any Write")
+		panic("UseOldFormat must be called before any Write")
 	}
 	b.newStyle = false
 }

@@ -99,11 +99,6 @@ char *linearize(int k, char **in, int inlen, char *dest, uint64_t destlen,
 bool check_matrix_fragment(char *frag, int frag_len, int piecesize) {
   size_t offset = 0;
 
-  bool aligned = (frag_len % (piecesize + getHeaderSize())) == 0;
-  if (!aligned) {
-    return false;
-  }
-
   while (offset < frag_len) {
     if (is_invalid_fragment_header((fragment_header_t *)&frag[offset])) {
       return false;

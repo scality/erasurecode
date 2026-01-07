@@ -209,8 +209,13 @@ func (backend *Backend) Close() error {
 
 // EncodeData is returned by all encode* functions
 type EncodeData struct {
-	Data [][]byte // Slice of []bytes ==> our K+N encoded fragments
-	Free func()   // cleanup closure (to free C allocated data once it becomes useless)
+	Data         [][]byte // Slice of []bytes ==> our K+N encoded fragments
+	Free         func()   // cleanup closure (to free C allocated data once it becomes useless)
+	RealDataSize int64    // the real size of the data, without considering the padding
+}
+
+func (e EncodeData) DataLen() int64 {
+	return e.RealDataSize
 }
 
 // Encode is the general purpose encoding function. It encodes data according
@@ -240,13 +245,14 @@ func (backend *Backend) Encode(data []byte) (*EncodeData, error) {
 	return &EncodeData{result, func() {
 		C.my_liberasurecode_encode_cleanup(
 			backend.libecDesc, C.size_t(fragLength), dataFrags, parityFrags)
-	}}, nil
+	}, int64(fragLength)}, nil
 }
 
 // EncodeMatrixWithBufferMatrix encodes data in small subpart of chunkSize bytes
 func (backend *Backend) EncodeMatrixWithBufferMatrix(bm *BufferMatrix, chunkSize int) (*EncodeData, error) {
 	var wg sync.WaitGroup
 	var ctx C.struct_encode_chunk_context
+	var totLen int64
 
 	data := bm.Bytes()
 	dataLen := bm.Length()
@@ -273,6 +279,7 @@ func (backend *Backend) EncodeMatrixWithBufferMatrix(bm *BufferMatrix, chunkSize
 			if i == int(ctx.number_of_subgroup)-1 {
 				fragLen = C.size_t(bm.FragLenLastSubGroup())
 			}
+			atomic.AddInt64(&totLen, int64(fragLen)+int64(backend.headerSize))
 			r := C.encode_chunk_buffermatrix(backend.libecDesc, pData, pDataLen,
 				nbFrags, &ctx, C.int(nth), fragLen)
 
@@ -288,7 +295,7 @@ func (backend *Backend) EncodeMatrixWithBufferMatrix(bm *BufferMatrix, chunkSize
 		return &EncodeData{nil, func() {
 				C.my_liberasurecode_encode_buffermatrix_cleanup(
 					backend.libecDesc, C.size_t(ctx.frags_len), ctx.datas, ctx.codings)
-			}},
+			}, totLen},
 			fmt.Errorf("error encoding chunk (%+v encoding failed)", errCounter)
 	}
 	result := make([][]byte, backend.K+backend.M)
@@ -307,7 +314,7 @@ func (backend *Backend) EncodeMatrixWithBufferMatrix(bm *BufferMatrix, chunkSize
 		runtime.KeepAlive(bm)
 		C.my_liberasurecode_encode_buffermatrix_cleanup(
 			backend.libecDesc, C.size_t(ctx.frags_len), ctx.datas, ctx.codings)
-	}}, nil
+	}, totLen}, nil
 }
 
 // DecodeData is the structure returned by all Decode* function
@@ -512,8 +519,9 @@ func (backend *Backend) DecodeMatrix(frags []ValidatedFragment, pieceSize int) (
 	var totLen int64
 	for i := 0; i < chunkInfo.NrChunk; i++ {
 		vect := make([][]byte, len(frags))
+		nextBound := min((i+1)*chunkInfo.ChunkSize, fragRangeLen)
 		for j := range frags {
-			vect[j] = frags[j][i*chunkInfo.ChunkSize : (i+1)*chunkInfo.ChunkSize]
+			vect[j] = frags[j][i*chunkInfo.ChunkSize : nextBound]
 		}
 
 		subdata, err := backend.Decode(vect)
@@ -599,6 +607,10 @@ func (backend *Backend) GetRangeMatrix(startIncl, endIncl, cellDataSize, fragSiz
 	   can at least check that it doesn't exceed the maximum payload that
 	   this configuration can handle. */
 	nrLines := fragSize / cellSize
+	//
+	if nrLines*cellSize < fragSize {
+		nrLines++
+	}
 
 	/* Inside a fragment (ie, inside a column), what is the
 	   stored amount of data? */
