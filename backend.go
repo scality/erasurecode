@@ -217,6 +217,12 @@ type EncodeData struct {
 func (e EncodeData) DataLen() int64 {
 	return e.RealDataSize
 }
+func (e *EncodeData) GetFragment(index int) []byte {
+	if index < 0 || index >= len(e.Data) {
+		return nil
+	}
+	return e.Data[index][:e.RealDataSize]
+}
 
 // Encode is the general purpose encoding function. It encodes data according
 // backend params and returns an EncodeData structure containing the Fragments
