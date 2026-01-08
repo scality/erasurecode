@@ -328,8 +328,17 @@ func (backend *Backend) EncodeMatrixWithBufferMatrix(bm *BufferMatrix, chunkSize
 // that clean some C dynamically allocated objects
 // If Free is not null, the closure should be used only when the Data is not needed anymore
 type DecodeData struct {
-	Data []byte
-	Free func()
+	Data         []byte
+	Free         func()
+	RealDataSize int64
+}
+
+func (d DecodeData) DataLen() int64 {
+	return d.RealDataSize
+}
+
+func (d *DecodeData) GetFragment() []byte {
+	return d.Data[:d.RealDataSize]
 }
 
 // // bufPool is a pool of bytes.Buffer of max size maxBuffer.
@@ -499,8 +508,9 @@ func (backend *Backend) LinearizeMatrix(frags []ValidatedFragment, pieceSize int
 	}
 
 	return &DecodeData{
-		data[:totLen:totLen],
-		func() {
+		Data:         data[:totLen:totLen],
+		RealDataSize: int64(totLen),
+		Free: func() {
 			backend.pool.Release(dataB)
 		}}, nil
 }
@@ -539,9 +549,12 @@ func (backend *Backend) DecodeMatrix(frags []ValidatedFragment, pieceSize int) (
 		subdata.Free()
 	}
 
-	return &DecodeData{data[:totLen:totLen], func() {
-		backend.pool.Release(dataB)
-	}}, nil
+	return &DecodeData{
+		Data:         data[:totLen:totLen],
+		RealDataSize: int64(totLen),
+		Free: func() {
+			backend.pool.Release(dataB)
+		}}, nil
 }
 
 // RangeMatrix describes information needed to decode a range of encoded frags
@@ -718,8 +731,10 @@ func (backend *Backend) Decode(frags [][]byte) (*DecodeData, error) {
 	runtime.KeepAlive(frags) // prevent frags from being GC-ed during decode
 	C.freeStrArray(cFrags)
 
-	return &DecodeData{(*[1 << 30]byte)(unsafe.Pointer(data))[:int(dataLength):int(dataLength)],
-			func() {
+	return &DecodeData{
+			Data:         (*[1 << 30]byte)(unsafe.Pointer(data))[:int(dataLength):int(dataLength)],
+			RealDataSize: int64(dataLength),
+			Free: func() {
 				C.liberasurecode_decode_cleanup(backend.libecDesc, data)
 			}},
 		nil
@@ -781,14 +796,17 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, pieceSi
 	dataB, data := backend.pool.New(dlen)
 
 	var errCounter uint32
+	var totLen int64
 	// TODO use goroutines here to leverage multicore computation
 	wg.Add(chunkNr)
 	for i := 0; i < chunkNr; i++ {
 		go func(chunkIdx int) {
 			vect := make([][]byte, len(frags))
-			for j := 0; j < len(frags); j++ {
-				vect[j] = frags[j][chunkIdx*chunkSize : (chunkIdx+1)*chunkSize]
+			for j := range frags {
+				length := min(len(frags[j]), (chunkIdx+1)*chunkSize)
+				vect[j] = frags[j][chunkIdx*chunkSize : length]
 			}
+			atomic.AddInt64(&totLen, int64(len(vect[0])))
 			if err := backend.reconstruct(vect, fragIndex, data[chunkIdx*chunkSize:]); err != nil {
 				atomic.AddUint32(&errCounter, 1)
 			}
@@ -799,9 +817,13 @@ func (backend *Backend) ReconstructMatrix(frags [][]byte, fragIndex int, pieceSi
 	if errCounter != 0 {
 		return nil, errors.New("sub reconstruction failed")
 	}
-	return &DecodeData{data[:dlen:dlen], func() {
-		backend.pool.Release(dataB)
-	}}, nil
+
+	return &DecodeData{
+		Data:         data[:totLen:totLen],
+		RealDataSize: int64(totLen),
+		Free: func() {
+			backend.pool.Release(dataB)
+		}}, nil
 }
 
 // IsInvalidFragment is a wrapper on C implementation
