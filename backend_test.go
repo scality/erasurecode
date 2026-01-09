@@ -1461,10 +1461,9 @@ func testRangeHelper(t *testing.T, useNewFormat bool) {
 	}
 
 	bm := NewBufferMatrix(chunkSize, len(buf), backend.K)
-	if useNewFormat {
-		bm.UseNewFormat()
+	if !useNewFormat {
+		bm.UseOldFormat()
 	}
-	// bm.UseNewFormat()
 	_, err := io.Copy(bm, bytes.NewReader(buf))
 	require.NoError(t, err)
 	bm.Finish()
