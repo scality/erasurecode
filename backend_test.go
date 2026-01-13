@@ -913,7 +913,7 @@ func TestLinearizeMatrixAndReconstruct(t *testing.T) {
 				frags2 = append(frags2, encoded.Data[i][rangeM.InFragRangeStartIncl:rangeM.InFragRangeEndExcl])
 			}
 
-			// now do the same test, but this time, insted of linearizing, we are going to reconstruct the stripes
+			// now do the same test, but this time, instead of linearizing, we are going to reconstruct the stripes
 			reconstructed, err := backend.ReconstructMatrix(frags2[1:], 0, currentChunkSize)
 
 			require.NoError(t, err)

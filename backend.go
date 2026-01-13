@@ -282,7 +282,7 @@ func (backend *Backend) EncodeMatrixWithBufferMatrix(bm *BufferMatrix, chunkSize
 		go func(nth int) {
 			fragLen := C.size_t(chunkSize)
 			// last subgroup has a different size
-			if i == int(ctx.number_of_subgroup)-1 {
+			if nth == int(ctx.number_of_subgroup)-1 {
 				fragLen = C.size_t(bm.FragLenLastSubGroup())
 			}
 			atomic.AddInt64(&totLen, int64(fragLen)+int64(backend.headerSize))
@@ -690,7 +690,7 @@ func (backend *Backend) GetRangeMatrix(startIncl, endIncl, cellDataSize, fragSiz
 	   all fragments (see (2) in the function's comment above). */
 	linearizedRangeStartIncl := startIncl - dataOffset
 
-	/* Decoding always works on a group boundary. */
+	/* Decoding always works on a column boundary. */
 	decodedRangeStartIncl := startIncl - lineStart*lineSize
 
 	return &RangeMatrix{

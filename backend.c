@@ -100,10 +100,14 @@ bool check_matrix_fragment(char *frag, int frag_len, int piecesize) {
   size_t offset = 0;
 
   while (offset < frag_len) {
+    if (offset + sizeof(fragment_header_t) > frag_len) {
+      // there is some remaining bytes, but not enough to read at least the header
+      return false;
+    }
     if (is_invalid_fragment_header((fragment_header_t *)&frag[offset])) {
       return false;
     }
-    offset += piecesize + getHeaderSize();
+    offset += ((fragment_header_t *)&frag[offset])->meta.size + getHeaderSize();
   }
 
   return true;
